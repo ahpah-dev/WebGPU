@@ -3,7 +3,7 @@ import { open, readFile, readdir, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 
-const architectures = new Set(['gemma3', 'qwen35']);
+const architectures = new Set(['gemma3', 'qwen35', 'llama', 'qwen2', 'qwen3']);
 const quants = new Set(['F32', 'F16', 'Q4_0', 'Q8_0', 'Q4_K_S', 'Q4_K_M', 'Q5_K_S', 'Q5_K_M', 'Q6_K']);
 const digestPattern = /^sha256:[a-f0-9]{64}$/;
 export async function defaultOllamaDirectory() {

@@ -33,11 +33,12 @@ test('Ollama catalog discovers namespaced models, labels unsupported models and 
   const root = await fixture(t);
   await model(root);
   await model(root, ['registry.ollama.ai', 'team', 'fine-tune', 'v1'], 'gemma3');
-  await model(root, ['registry.ollama.ai', 'library', 'qwen2.5', '0.5b'], 'qwen2');
+  await model(root, ['registry.ollama.ai', 'library', 'phi3', 'mini'], 'phi3');
+  await model(root, ['registry.ollama.ai', 'library', 'llama3.2', '1b'], 'llama');
   const catalog = new OllamaCatalog(root), models = await catalog.refresh();
-  assert.deepEqual(models.filter(m => m.supported).map(m => m.name), ['qwen3.8:27b', 'team/fine-tune:v1']);
-  const unsupported = models.find(m => m.name === 'qwen2.5:0.5b')!;
-  assert.equal(unsupported.supported, false); assert.match(unsupported.reason, /qwen2/);
+  assert.deepEqual(models.filter(m => m.supported).map(m => m.name), ['llama3.2:1b', 'qwen3.8:27b', 'team/fine-tune:v1']);
+  const unsupported = models.find(m => m.name === 'phi3:mini')!;
+  assert.equal(unsupported.supported, false); assert.match(unsupported.reason, /phi3/);
   assert.ok(models.every(m => !('path' in m) && !JSON.stringify(m).includes(root)));
   assert.equal(catalog.resolve(unsupported.id), undefined);
   assert.deepEqual(await new OllamaCatalog(join(root, 'not-installed')).refresh(), []);

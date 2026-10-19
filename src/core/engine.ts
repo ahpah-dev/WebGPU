@@ -5,11 +5,17 @@ import { WeightPager, type PagingStats } from './pager.ts';
 import { decodeWeight } from './quant.ts';
 import { Tokenizer } from './tokenizer.ts';
 import { QwenTokenizer } from './qwen-tokenizer.ts';
-import { qwenKernels } from './qwen-shaders.ts';
-import { matmulShader, normShader, ropeShader, attentionShader, addShader, geluShader } from './shaders.ts';
-import { attentionMemory, cacheCopies, MAX_CONTEXT, MAX_MESSAGE_CHARS, outputLimit, validateContext } from './context.ts';
+import { Gpt2Tokenizer } from './gpt2-tokenizer.ts';
+import { qwenKernels, siluShader } from './qwen-shaders.ts';
+import { matmulShader, normShader, ropeShader, ropeNeoxShader, ropeClassicShader, biasAddShader, activateShader, attentionShader, addShader, geluShader } from './shaders.ts';
+import { attentionMemory, cacheCopies, MAX_CONTEXT, MAX_MESSAGE_CHARS, outputLimit, suggestBudget, validateContext } from './context.ts';
 
-export type PerformanceMode = 'low-memory' | 'fast';
+export type PerformanceMode = 'lite' | 'low-memory' | 'fast';
+const PRESETS: Record<PerformanceMode, { budget: number; batch: number; page: number }> = {
+  lite: { budget: 512, batch: 8, page: 16 },
+  'low-memory': { budget: 2048, batch: 16, page: 16 },
+  fast: { budget: 6144, batch: 128, page: 64 },
+};
 export interface LoadOptions { gpuBudgetMiB?: number; contextLength?: number; batchSize?: number; performance?: PerformanceMode }
 export interface Message { role: 'user' | 'assistant'; content: string }
 export interface GenerationOptions { maxTokens?: number; temperature?: number; topK?: number; topP?: number }
@@ -22,7 +28,7 @@ export class PagedEngine {
   private source!: ByteSource;
   private gguf!: GGUF;
   private config!: ModelConfig;
-  private tokenizer!: Tokenizer | QwenTokenizer;
+  private tokenizer!: Tokenizer | QwenTokenizer | Gpt2Tokenizer;
   private pager!: WeightPager;
   private work: Record<string, GPUBuffer> = {};
   private norms = new Map<string, GPUBuffer>();
@@ -44,16 +50,23 @@ export class PagedEngine {
   constructor(progress: (p: Progress) => void = () => {}) { this.progress = progress; }
   async load(input: SourceInput, options: LoadOptions = {}, signal?: AbortSignal): Promise<ModelInfo> {
     this.performance = options.performance ?? 'low-memory';
-    if (!['low-memory', 'fast'].includes(this.performance)) throw new Error('Performance must be low-memory or fast.');
-    this.context = options.contextLength ?? 512; this.batch = options.batchSize ?? (this.performance === 'fast' ? 128 : 16); this.budget = options.gpuBudgetMiB ?? (this.performance === 'fast' ? 6144 : 2048);
+    if (!(this.performance in PRESETS)) throw new Error('Performance must be lite, low-memory or fast.');
+    const preset = PRESETS[this.performance];
+    this.context = options.contextLength ?? 512; this.batch = options.batchSize ?? preset.batch;
     validateContext(this.context);
     if (![1, 8, 16, 32, 64, 128].includes(this.batch)) throw new Error('Batch size must be 1, 8, 16, 32, 64 or 128.');
-    if (!Number.isInteger(this.budget) || this.budget < 512 || this.budget > 16384) throw new Error('GPU budget must be 512–16384 MiB.');
+    if (options.gpuBudgetMiB !== undefined && (!Number.isInteger(options.gpuBudgetMiB) || options.gpuBudgetMiB < 512 || options.gpuBudgetMiB > 16384)) throw new Error('GPU budget must be 512–16384 MiB.');
     this.source = makeSource(input);
     this.progress({ phase: 'loading', detail: 'Reading GGUF metadata and tokenizer', fraction: 0.05 });
     this.gguf = await readGGUF(this.source, signal); this.config = modelConfig(this.gguf);
     validateContext(this.context, this.config.maxContext);
-    this.tokenizer = this.config.architecture === 'qwen35' ? new QwenTokenizer(this.gguf.metadata) : new Tokenizer(this.gguf.metadata);
+    // Choosing the budget after the file size is known keeps small models fully
+    // resident and avoids over-allocating VRAM for a 0.5B model.
+    this.budget = options.gpuBudgetMiB ?? suggestBudget(this.source.size, this.performance);
+    if (!Number.isInteger(this.budget) || this.budget < 512 || this.budget > 16384) throw new Error('GPU budget must be 512–16384 MiB.');
+    this.tokenizer = this.config.architecture === 'qwen35' ? new QwenTokenizer(this.gguf.metadata)
+      : this.config.family === 'llama' ? new Gpt2Tokenizer(this.gguf.metadata)
+      : new Tokenizer(this.gguf.metadata);
     const c = this.config, r = c.recurrent, memory = attentionMemory(c, this.context, this.batch);
     this.kvCapacities = memory.capacities;
     if (memory.totalBytes + 256 * MiB > this.budget * MiB) throw new Error(`A ${this.context.toLocaleString()}-token context needs ${Math.ceil(memory.totalBytes / MiB).toLocaleString()} MiB of attention state plus working memory. Choose at least ${Math.ceil((memory.totalBytes + 256 * MiB) / MiB).toLocaleString()} MiB of GPU budget, or reduce context.`);
@@ -65,8 +78,19 @@ export class PagedEngine {
       this.progress({ phase: 'loading', detail: 'Compiling quantized WebGPU kernels', fraction: 0.25 });
       const types = new Set([...this.gguf.tensors.values()].filter(t => t.dims.length === 2).map(t => t.type));
       for (const type of types) this.mm.set(type, await this.gpu.pipeline(matmulShader(type), `quantized matmul ${type}`));
-      for (const [name, code] of Object.entries({ norm: normShader, rope: ropeShader, attention: attentionShader(this.context), add: addShader, gelu: geluShader })) this.kernels[name] = await this.gpu.pipeline(code, name);
-      if (r) for (const [name, code] of Object.entries(qwenKernels)) this.kernels[name] = await this.gpu.pipeline(code, name);
+      // Only the kernels this architecture needs are compiled: a small model on a
+      // laptop should not pay for shaders it cannot reach.
+      const base: Record<string, string> = { norm: normShader, add: addShader, attention: attentionShader(this.context) };
+      if (c.family === 'gemma3') Object.assign(base, { rope: ropeShader, gelu: geluShader });
+      if (c.family === 'qwen35') Object.assign(base, qwenKernels, { rope: ropeShader });
+      if (c.family === 'llama') {
+        // Qwen3 folds per-head Q/K normalization into the rope kernel; Qwen2 and
+        // Llama need rotation only, with different pair layouts.
+        base.rope = c.qkNorm ? ropeShader : c.rope === 'norm' ? ropeClassicShader : ropeNeoxShader;
+        if (c.ffnGate) base.silu = siluShader; else base.activate = activateShader;
+        if (Object.values(c.bias).some(Boolean)) base.biasAdd = biasAddShader;
+      }
+      for (const [name, code] of Object.entries(base)) this.kernels[name] = await this.gpu.pipeline(code, name);
       const sizes: Record<string, number> = { hidden: c.hidden, normed: c.hidden, q: c.heads * c.headDim, k: c.kvHeads * c.headDim, v: c.kvHeads * c.headDim, attention: c.heads * c.headDim, projection: c.hidden, gate: c.intermediate, up: c.intermediate, product: c.intermediate, down: c.hidden };
       if (r) Object.assign(sizes, { qg: 2 * c.heads * c.headDim, attnGate: c.heads * c.headDim, qkv: (2 * r.keyHeads + r.valueHeads) * r.headDim, convolved: (2 * r.keyHeads + r.valueHeads) * r.headDim, z: r.valueHeads * r.headDim, alpha: r.valueHeads, beta: r.valueHeads, control: 2 * r.valueHeads, recOutput: r.valueHeads * r.headDim, recNorm: r.valueHeads * r.headDim });
       for (const [name, n] of Object.entries(sizes)) this.work[name] = this.gpu.buffer(this.batch * n * 4, name);
@@ -83,7 +107,7 @@ export class PagedEngine {
         const b = this.gpu.buffer(values.byteLength, t.name); this.gpu.write(b, values); this.norms.set(t.name, b);
         if (i % 20 === 0) this.progress({ phase: 'loading', detail: 'Loading normalization vectors', fraction: 0.5 + 0.45 * i / norms.length });
       }
-      this.pager = new WeightPager(this.gpu, this.source, this.performance === 'fast' ? 64 : 16); await this.gpu.done();
+      this.pager = new WeightPager(this.gpu, this.source, preset.page); await this.gpu.done();
       this.progress({ phase: 'ready', detail: 'Ready. Model weights will page in as you generate.', fraction: 1, stats: this.pager.snapshot() });
       return this.info();
     } catch (e) { this.dispose(); throw e; }
@@ -120,11 +144,15 @@ export class PagedEngine {
     }
     this.gpu.write(w.hidden, input);
     for (let l = 0; l < c.layers; l++) {
-      signal?.throwIfAborted(); const prefix = `blk.${l}.`, local = l % c.period !== c.period - 1;
+      signal?.throwIfAborted(); const prefix = `blk.${l}.`, local = c.period > 1 && l % c.period !== c.period - 1;
       this.progress({ phase: start + n > 1 && n > 1 ? 'prefill' : 'generating', detail: `Layer ${l + 1} / ${c.layers} · token ${start + 1}${n > 1 ? `–${start + n}` : ''}`, fraction: l / c.layers, layer: l, stats: this.pager.snapshot() });
       this.norm(w.hidden, w.normed, prefix + 'attn_norm.weight', n);
       if (c.architecture === 'qwen35') {
         await this.qwenLayer(l, n, start, signal);
+        await this.gpu.done(); this.pendingPages = 0; this.pendingBytes = 0; continue;
+      }
+      if (c.family === 'llama') {
+        await this.denseLayer(l, n, start, signal);
         await this.gpu.done(); this.pendingPages = 0; this.pendingBytes = 0; continue;
       }
       await this.linear(prefix + 'attn_q.weight', w.normed, w.q, n, signal);
@@ -183,6 +211,49 @@ export class PagedEngine {
     await this.linear(prefix + 'ffn_down.weight', w.product, w.down, n, signal);
     this.gpu.run(this.kernels.add, [w.down, w.hidden], [n * c.hidden], Math.ceil(n * c.hidden / 256));
   }
+  /** Pre-attention normalization has already been applied by `forward`. This is the
+   * standard dense decoder shared by Llama 3.x, Mistral, SmolLM and Qwen2/3: rotation
+   * with an optional Q/K norm, optional projection bias, and a gated MLP. */
+  private async denseLayer(layer: number, n: number, start: number, signal?: AbortSignal) {
+    const c = this.config, w = this.work, prefix = `blk.${layer}.`, kvDim = c.kvHeads * c.headDim;
+    await this.linear(prefix + 'attn_q.weight', w.normed, w.q, n, signal);
+    if (c.bias.q) this.bias(w.q, prefix + 'attn_q.bias', c.heads * c.headDim, n);
+    await this.linear(prefix + 'attn_k.weight', w.normed, w.k, n, signal);
+    if (c.bias.k) this.bias(w.k, prefix + 'attn_k.bias', kvDim, n);
+    await this.linear(prefix + 'attn_v.weight', w.normed, w.v, n, signal);
+    if (c.bias.v) this.bias(w.v, prefix + 'attn_v.bias', kvDim, n);
+    if (c.qkNorm) {
+      // Qwen3: per-head RMS normalization and rotation in one kernel (half-split).
+      for (const [name, heads] of [['q', c.heads], ['k', c.kvHeads]] as const)
+        this.gpu.run(this.kernels.rope, [w[name], this.norms.get(prefix + `attn_${name}_norm.weight`)!], [heads, c.headDim, start, { f: c.theta }, { f: c.ropeScale }, { f: c.epsilon }, c.rotaryDim, 0], heads, n);
+    } else {
+      for (const [name, heads] of [['q', c.heads], ['k', c.kvHeads]] as const)
+        this.gpu.run(this.kernels.rope, [w[name]], [heads, c.headDim, start, { f: c.theta }, { f: c.ropeScale }, c.rotaryDim, 0, 0], heads, n);
+    }
+    this.cacheKV(layer, n, start);
+    const kv = this.kv[layer]!, window = c.slidingWindow > 0 ? c.slidingWindow : this.context;
+    this.gpu.run(this.kernels.attention, [w.q, kv.k, kv.v, w.attention], [c.heads, c.kvHeads, c.headDim, start, { f: c.attentionScale }, window, this.kvCapacities[layer], 0], c.heads, n);
+    await this.linear(prefix + 'attn_output.weight', w.attention, w.projection, n, signal);
+    if (c.bias.output) this.bias(w.projection, prefix + 'attn_output.bias', c.hidden, n);
+    this.gpu.run(this.kernels.add, [w.projection, w.hidden], [n * c.hidden], Math.ceil(n * c.hidden / 256));
+    this.norm(w.hidden, w.normed, prefix + 'ffn_norm.weight', n);
+    if (c.ffnGate) {
+      await this.linear(prefix + 'ffn_up.weight', w.normed, w.up, n, signal);
+      await this.linear(prefix + 'ffn_gate.weight', w.normed, w.gate, n, signal);
+      this.gpu.run(this.kernels.silu, [w.gate, w.up, w.product], [n * c.intermediate], Math.ceil(n * c.intermediate / 256));
+      await this.linear(prefix + 'ffn_down.weight', w.product, w.down, n, signal);
+    } else {
+      await this.linear(prefix + 'ffn_up.weight', w.normed, w.up, n, signal);
+      this.gpu.run(this.kernels.activate, [w.up], [n * c.intermediate], Math.ceil(n * c.intermediate / 256));
+      await this.linear(prefix + 'ffn_down.weight', w.up, w.down, n, signal);
+    }
+    this.gpu.run(this.kernels.add, [w.down, w.hidden], [n * c.hidden], Math.ceil(n * c.hidden / 256));
+  }
+  private bias(target: GPUBuffer, name: string, width: number, batch: number) {
+    const weights = this.norms.get(name);
+    if (!weights) return;
+    this.gpu.run(this.kernels.biasAdd, [target, weights], [batch * width, width], Math.ceil(batch * width / 256));
+  }
   async *generate(messages: Message[], options: GenerationOptions = {}, signal?: AbortSignal): AsyncGenerator<TokenEvent> {
     if (this.busy) throw new Error('A generation is already running.');
     if (this.disposed || !this.pager) throw new Error('Load a model first.');
@@ -200,7 +271,7 @@ export class PagedEngine {
       // Last prompt token must be evaluated to obtain logits even for an exact-prefix retry.
       shared = Math.min(shared, prompt.length - 1);
       // Sliding rings cannot rewind to an earlier prefix after newer keys overwrite it.
-      if (this.config.architecture === 'gemma3' && shared < this.tokensInCache.length && this.kvCapacities.some(capacity => capacity < this.context)) shared = 0;
+      if (shared < this.tokensInCache.length && this.kvCapacities.some(capacity => capacity < this.context)) shared = 0;
       // A recurrent state cannot be rewound like a KV cache. Rebuild on every new
       // request so edits, retries, cancellation and multi-turn chat are deterministic.
       if (this.config.recurrent) {

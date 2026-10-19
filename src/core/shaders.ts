@@ -135,3 +135,47 @@ struct P{n:u32,pad0:u32,pad1:u32,pad2:u32}
 @compute @workgroup_size(256) fn main(@builtin(global_invocation_id) g:vec3<u32>){
   if(g.x<p.n){let x=gate[g.x];y[g.x]=0.5*x*(1.0+tanh(0.7978845608*(x+0.044715*x*x*x)))*up[g.x];}
 }`;
+/** Rotary embedding only, half-split (NeoX) pairing: Qwen2's GGUF layout. */
+export const ropeNeoxShader = `
+@group(0) @binding(0) var<storage,read_write> x:array<f32>;
+struct P{heads:u32,hd:u32,start:u32,theta:f32,scale:f32,rotaryDim:u32,pad0:u32,pad1:u32}
+@group(0) @binding(1) var<uniform> p:P;
+@compute @workgroup_size(64)
+fn main(@builtin(local_invocation_index) lane:u32,@builtin(workgroup_id) g:vec3<u32>){
+  let base=(g.y*p.heads+g.x)*p.hd;
+  let rot=select(p.rotaryDim,p.hd,p.rotaryDim==0u);
+  for(var i=lane;i<rot/2u;i+=64u){
+    let angle=f32(p.start+g.y)*p.scale/pow(p.theta,f32(2u*i)/f32(rot));
+    let a=x[base+i];let b=x[base+i+rot/2u];
+    x[base+i]=a*cos(angle)-b*sin(angle);x[base+i+rot/2u]=a*sin(angle)+b*cos(angle);
+  }
+}`;
+/** Rotary embedding only, adjacent-pair pairing. Llama and Mistral GGUF files store
+ * Q/K already permuted for this layout, which is why it differs from Qwen2's. */
+export const ropeClassicShader = `
+@group(0) @binding(0) var<storage,read_write> x:array<f32>;
+struct P{heads:u32,hd:u32,start:u32,theta:f32,scale:f32,rotaryDim:u32,pad0:u32,pad1:u32}
+@group(0) @binding(1) var<uniform> p:P;
+@compute @workgroup_size(64)
+fn main(@builtin(local_invocation_index) lane:u32,@builtin(workgroup_id) g:vec3<u32>){
+  let base=(g.y*p.heads+g.x)*p.hd;
+  let rot=select(p.rotaryDim,p.hd,p.rotaryDim==0u);
+  for(var j=lane;j<rot/2u;j+=64u){
+    let angle=f32(p.start+g.y)*p.scale/pow(p.theta,f32(2u*j)/f32(rot));
+    let a=x[base+2u*j];let b=x[base+2u*j+1u];
+    x[base+2u*j]=a*cos(angle)-b*sin(angle);x[base+2u*j+1u]=a*sin(angle)+b*cos(angle);
+  }
+}`;
+/** Adds a per-column bias to a batched projection (Qwen2 stores Q/K/V biases). */
+export const biasAddShader = `
+@group(0) @binding(0) var<storage,read_write> y:array<f32>;
+@group(0) @binding(1) var<storage,read> b:array<f32>;
+struct P{n:u32,width:u32,pad0:u32,pad1:u32}
+@group(0) @binding(2) var<uniform> p:P;
+@compute @workgroup_size(256) fn main(@builtin(global_invocation_id) g:vec3<u32>){if(g.x<p.n){y[g.x]+=b[g.x%p.width];}}`;
+/** In-place SiLU for ungated MLPs (Llama 2 era files without ffn_gate). */
+export const activateShader = `
+@group(0) @binding(0) var<storage,read_write> x:array<f32>;
+struct P{n:u32,pad0:u32,pad1:u32,pad2:u32}
+@group(0) @binding(1) var<uniform> p:P;
+@compute @workgroup_size(256) fn main(@builtin(global_invocation_id) g:vec3<u32>){if(g.x<p.n){let v=x[g.x];x[g.x]=v/(1.0+exp(-v));}}`;

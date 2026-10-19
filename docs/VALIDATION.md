@@ -1,5 +1,18 @@
 # Validation — 2026-10-19
 
+## Small dense models in the browser
+
+The dense decoder (`llama`, `qwen2`, `qwen3`) was checked against an independent CPU reference on real WebGPU hardware, not by reading the source.
+
+- `npm run check:dense` writes three synthetic float32 GGUFs (two layers, 64 hidden, 4 query heads / 2 KV heads, head size 16, 259-token byte-level vocabulary) and runs each through the built browser SDK in headless Chrome with a **512 MiB budget** and 8-token prompt batches. Model bytes were supplied by the loopback byte server through bounded HTTP ranges; a `File` object exercises the same pager.
+- The CPU reference is a separate float64 implementation of embedding lookup, RMS norm, GQA attention with a causal loop, both RoPE layouts, SwiGLU, and the output projection. It computes four greedy tokens per model.
+- Result: **12/12 tokens matched** for `llama` (adjacent-pair RoPE), `qwen2` (Q/K/V bias), and `qwen3` (per-head Q/K norm with half-split RoPE). Reference prompt was 24 ChatML tokens; the browser processed it in three prompt batches and then decoded three times. Adapter: `blackwell`. Smallest reference top-2 logit margin: **0.19**.
+- The fixtures share no weights with real checkpoints and do not measure speed. Real-model coverage for these architectures still depends on the user supplying a GGUF.
+
+Node tests grew to **67 passing** cases. New coverage: GGUF header peeking and truncation, GPT-2/llama-3 pre-tokenization and byte fallback, chat-template detection and rejection, Qwen2 bias and Qwen3 Q/K-norm config detection, mixture-of-experts rejection, budget suggestion per preset, bridge authentication and method validation, and folder-library manifest/blob discovery including traversal rejection.
+
+The UI was driven in headless Chrome: the key chip, masked/revealed key, copy-to-clipboard notice, key rotation with immediate invalidation, origin and client counters, and all three copyable snippets render without console errors. Over `BroadcastChannel`, a wrong key returns `The API key is invalid`, the current key authenticates and returns `No model is loaded yet` when idle, and an unknown method is rejected. Screenshots: [playground](playground.png), [model library](models.png), [developer API](api.png).
+
 ## Extended context and output (0.5.0)
 
 - All 32 Node tests pass, including generation of 3,096 deterministic tokens through the real generation loop with a synthetic forward pass. This crosses the old 2,048-token cap and ends at the exact shared-context boundary. No claim of a full 32K model reply is made from that test.

@@ -1,14 +1,10 @@
 import type { Metadata } from './gguf.ts';
-import { mergeSymbols } from './bpe.ts';
+import { byteAlphabet, mergeSymbols } from './bpe.ts';
 
 // Qwen3.8's Unicode pre-tokenizer, followed by GPT-2 byte encoding and ranked BPE.
 // Contractions alone are case-insensitive; the Unicode letter/mark classes are not.
 const pieces = /'[sStT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD]|[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+|\p{N}| ?[^\s\p{L}\p{M}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+/gu;
-export function byteAlphabet(): string[] {
-  const kept = Array.from({ length: 256 }, (_, b) => b).filter(b => b >= 33 && b <= 126 || b >= 161 && b <= 172 || b >= 174);
-  const codes = new Set(kept); let extra = 256;
-  return Array.from({ length: 256 }, (_, b) => String.fromCodePoint(codes.has(b) ? b : extra++));
-}
+export { byteAlphabet };
 export class QwenTokenizer {
   readonly tokens: string[];
   readonly eos: Set<number>;

@@ -1,3 +1,9 @@
+/** The GPT-2 byte ↔ unicode table shared by every byte-level BPE vocabulary. */
+export function byteAlphabet(): string[] {
+  const kept = Array.from({ length: 256 }, (_, b) => b).filter(b => b >= 33 && b <= 126 || b >= 161 && b <= 172 || b >= 174);
+  const codes = new Set(kept); let extra = 256;
+  return Array.from({ length: 256 }, (_, b) => String.fromCodePoint(codes.has(b) ? b : extra++));
+}
 /** Adjacent-pair BPE with a heap, avoiding a full scan after every merge on long input.
  * Higher scores win; ties keep the original left-to-right ordering. */
 export function mergeSymbols(symbols: string[], score: (a: string, b: string) => number | undefined): string[] {

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { attentionMemory, cacheCopies, outputLimit, validateContext } from '../src/core/context.ts';
+import { attentionMemory, cacheCopies, outputLimit, suggestBudget, validateContext } from '../src/core/context.ts';
 import { PagedEngine } from '../src/core/engine.ts';
 import type { ModelConfig } from '../src/core/gguf.ts';
 import { mergeSymbols } from '../src/core/bpe.ts';
@@ -16,7 +16,7 @@ test('context respects integer, runtime, and model limits; output uses the remai
   assert.throws(() => outputLimit(32769, 100, 32768), /maxTokens/);
 });
 test('Gemma local caches retain the full window for all queries in a batch, including ring wrap', () => {
-  const c = { architecture: 'gemma3', layers: 6, period: 6, window: 1024, kvHeads: 4, headDim: 128 } as ModelConfig;
+  const c = { architecture: 'gemma3', family: 'gemma3', layers: 6, period: 6, window: 1024, kvHeads: 4, headDim: 128 } as ModelConfig;
   const memory = attentionMemory(c, 32768, 128);
   assert.deepEqual(memory.capacities, [1151, 1151, 1151, 1151, 1151, 32768]);
   assert.equal(memory.totalBytes, (5 * 1151 + 32768) * 4 * 128 * 8);
@@ -29,10 +29,28 @@ test('Gemma local caches retain the full window for all queries in a batch, incl
   }
 });
 test('Qwen caches only full-attention layers and includes fixed recurrent state', () => {
-  const c = { architecture: 'qwen35', layers: 4, kvHeads: 4, headDim: 256, recurrent: { keyHeads: 16, valueHeads: 48, headDim: 128, convKernel: 4, layers: [true, true, true, false] } } as ModelConfig;
+  const c = { architecture: 'qwen35', family: 'qwen35', layers: 4, kvHeads: 4, headDim: 256, recurrent: { keyHeads: 16, valueHeads: 48, headDim: 128, convKernel: 4, layers: [true, true, true, false] } } as ModelConfig;
   const memory = attentionMemory(c, 32768, 128);
   assert.deepEqual(memory.capacities, [0, 0, 0, 32768]);
   assert.equal(memory.kvBytes, 32768 * 4 * 256 * 8); assert.ok(memory.stateBytes > 0);
+});
+test('Llama family allocates a full-context KV cache and never a sliding window', () => {
+  const c = { architecture: 'llama', family: 'llama', layers: 3, period: 0, window: 0, kvHeads: 2, headDim: 16 } as ModelConfig;
+  const memory = attentionMemory(c, 4096, 8);
+  assert.deepEqual(memory.capacities, [4096, 4096, 4096]);
+  assert.equal(memory.kvBytes, 3 * 4096 * 2 * 16 * 8);
+});
+test('suggested budgets keep small models resident and cap large ones per preset', () => {
+  const tiny = 400 * 1024 ** 2, mid = 2 * 1024 ** 3, huge = 16 * 1024 ** 3;
+  assert.equal(suggestBudget(tiny, 'lite'), 1024);
+  assert.equal(suggestBudget(tiny, 'low-memory'), 1024);
+  assert.equal(suggestBudget(mid, 'low-memory'), 2048);
+  assert.equal(suggestBudget(huge, 'low-memory'), 2048);
+  assert.equal(suggestBudget(huge, 'fast'), 6144);
+  assert.equal(suggestBudget(tiny, 'fast'), 2048);
+  for (const mode of ['lite', 'low-memory', 'fast'] as const) for (const bytes of [0, tiny, mid, huge]) {
+    const budget = suggestBudget(bytes, mode); assert.ok(budget >= 512 && budget <= 16384); assert.equal(budget % 256, 0);
+  }
 });
 test('generation continues beyond 2048 output tokens and stops at the exact remaining context boundary', async () => {
   const engine = new PagedEngine(), positions: number[] = [];
