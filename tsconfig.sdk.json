@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "noEmit": false, "declaration": true, "outDir": "dist/sdk", "rootDir": "src", "rewriteRelativeImportExtensions": true },
+  "include": ["src/core", "src/sdk.ts", "src/worker.ts", "src/verify.ts"]
+}

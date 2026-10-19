@@ -1,0 +1,8 @@
+node_modules/
+dist/
+*.gguf
+*.log
+.env*
+!.env.example
+test-results/
+.DS_Store

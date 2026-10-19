@@ -1,0 +1,31 @@
+{
+  "date": "2026-10-19",
+  "runtime": "browser WebGPU, standalone SDK",
+  "model": "Gemma 3 27B Q4_K_M",
+  "fileBytes": 16555661472,
+  "parameters": 27009007616,
+  "hardware": "NVIDIA RTX 5070, 12 GB VRAM, 16 GB RAM",
+  "gpuBudgetMiB": 2048,
+  "contextLength": 512,
+  "batchSize": 32,
+  "promptTokens": 21,
+  "temperature": 0,
+  "maxTokens": 1,
+  "prompt": "Name the capital of France. Answer with one word.",
+  "result": {
+    "token": 50429,
+    "text": "Paris",
+    "tokens": 1,
+    "seconds": 120.26930000001192,
+    "stats": {
+      "readBytes": 16534430010,
+      "readMs": 107808.19999992847,
+      "uploads": 1121,
+      "cacheHits": 0,
+      "cacheBytes": 1572541992,
+      "gpuBytes": 2128462380,
+      "peakGpuBytes": 2129510960
+    }
+  },
+  "scope": "One-token smoke test, not a throughput or quality benchmark. GPU allocation counter excludes browser/driver overhead. Weight bytes served by a static loopback server; all inference in browser."
+}

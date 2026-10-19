@@ -1,0 +1,16 @@
+{
+  "name": "webgpu-paged",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Browser-native, paged Gemma 3 inference for models larger than GPU memory.",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc --noEmit && vite build && tsc -p tsconfig.sdk.json && node scripts/finalize-sdk.mjs",
+    "start": "node server/serve.mjs",
+    "test": "node --experimental-strip-types --test tests/*.test.ts"
+  },
+  "engines": { "node": ">=22.18.0" },
+  "devDependencies": { "@webgpu/types": "0.1.74", "typescript": "7.0.2", "vite": "8.3.4" },
+  "license": "MIT"
+}
