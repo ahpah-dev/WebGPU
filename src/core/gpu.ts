@@ -52,6 +52,11 @@ export class Compute {
   copy(src: GPUBuffer, dst: GPUBuffer, size: number, srcOffset = 0, dstOffset = 0) {
     const e = this.device.createCommandEncoder(); e.copyBufferToBuffer(src, srcOffset, dst, dstOffset, size); this.device.queue.submit([e.finish()]);
   }
+  clear(buffers: GPUBuffer[]) {
+    const encoder = this.device.createCommandEncoder();
+    for (const b of buffers) encoder.clearBuffer(b);
+    this.device.queue.submit([encoder.finish()]);
+  }
   async done() { await this.device.queue.onSubmittedWorkDone(); this.check(); }
   async read(b: GPUBuffer, size: number) {
     const rb = this.buffer(size, 'readback', GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST);

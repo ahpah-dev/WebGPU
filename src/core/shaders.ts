@@ -69,7 +69,7 @@ fn main(@builtin(local_invocation_index) lane:u32,@builtin(workgroup_id) g:vec3<
 export const ropeShader = `
 @group(0) @binding(0) var<storage,read_write> x:array<f32>;
 @group(0) @binding(1) var<storage,read> w:array<f32>;
-struct P{heads:u32,hd:u32,start:u32,theta:f32,scale:f32,epsilon:f32,pad0:u32,pad1:u32}
+struct P{heads:u32,hd:u32,start:u32,theta:f32,scale:f32,epsilon:f32,rotaryDim:u32,pad1:u32}
 @group(0) @binding(2) var<uniform> p:P;
 ${reduction}
 @compute @workgroup_size(64)
@@ -77,11 +77,13 @@ fn main(@builtin(local_invocation_index) lane:u32,@builtin(workgroup_id) g:vec3<
   let base=(g.y*p.heads+g.x)*p.hd;var sum=0.0;
   for(var i=lane;i<p.hd;i+=64u){sum+=x[base+i]*x[base+i];}
   let inverse=inverseSqrt(reduceSum(lane,sum)/f32(p.hd)+p.epsilon);
-  for(var i=lane;i<p.hd/2u;i+=64u){
-    let angle=f32(p.start+g.y)*p.scale/pow(p.theta,f32(2u*i)/f32(p.hd));
-    let a=x[base+i]*w[i]*inverse;let b=x[base+i+p.hd/2u]*w[i+p.hd/2u]*inverse;
-    x[base+i]=a*cos(angle)-b*sin(angle);x[base+i+p.hd/2u]=a*sin(angle)+b*cos(angle);
+  let rot=select(p.rotaryDim,p.hd,p.rotaryDim==0u);
+  for(var i=lane;i<rot/2u;i+=64u){
+    let angle=f32(p.start+g.y)*p.scale/pow(p.theta,f32(2u*i)/f32(rot));
+    let a=x[base+i]*w[i]*inverse;let b=x[base+i+rot/2u]*w[i+rot/2u]*inverse;
+    x[base+i]=a*cos(angle)-b*sin(angle);x[base+i+rot/2u]=a*sin(angle)+b*cos(angle);
   }
+  for(var i=rot+lane;i<p.hd;i+=64u){x[base+i]*=w[i]*inverse;}
 }`;
 export function attentionShader(context: number): string {
   return `

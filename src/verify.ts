@@ -3,6 +3,7 @@ import { matmulShader, attentionShader, normShader, ropeShader } from './core/sh
 import { decodeWeight } from './core/quant.ts';
 import { QUANTS } from './core/gguf.ts';
 import { WebGPU } from './sdk.ts';
+import { verifyQwen } from './verify-qwen.ts';
 const result = document.getElementById('results')!;
 const log = (s: string) => { result.textContent += s + '\n'; };
 let model: WebGPU | undefined;
@@ -70,6 +71,7 @@ document.getElementById('math')!.onclick = async () => {
     gpu.write(reusable, new Float32Array([5, 6, 7, 8])); gpu.run(linear, [reusable, vector, outputs], [4, 1, 2, 1, 0, 0, 0, 0, 0], 1);
     const ordered = new Float32Array(await gpu.read(outputs, 8)); near(ordered[0], 10, 'old page consumed'); near(ordered[1], 26, 'new page consumed');
     log('PASS ordered writes preserve both uses of a recycled weight page'); log('ALL 12 GPU CHECKS PASSED');
+    await verifyQwen(gpu, log);
   } catch (e) { log(`FAIL: ${e instanceof Error ? e.message : e}`); }
   finally { gpu.dispose(); }
 };
@@ -78,7 +80,7 @@ document.getElementById('model')!.onclick = async () => {
   const progress = document.createElement('p'); result.before(progress);
   model.onProgress = p => { progress.textContent = p.detail; };
   try {
-    const response = await fetch('/model-info'), descriptor = await response.json(); if (!descriptor) throw new Error('Start the byte server with --ollama-model gemma3:27b.'); descriptor.url = new URL(descriptor.url, location.href).href;
+    const response = await fetch('/model-info'), descriptor = await response.json(); if (!descriptor) throw new Error('Start the byte server with --ollama-model qwen3.8:27b or gemma3:27b.'); descriptor.url = new URL(descriptor.url, location.href).href;
     const info = await model.load(descriptor, { gpuBudgetMiB: 2048, contextLength: 512, batchSize: 32 });
     log(JSON.stringify(info));
     for await (const token of model.generate([{ role: 'user', content: 'Name the capital of France. Answer with one word.' }], { temperature: 0, maxTokens: 1 })) { log(JSON.stringify(token)); }

@@ -82,29 +82,45 @@ export async function readGGUF(source: ByteSource, signal?: AbortSignal): Promis
   }
 }
 export interface ModelConfig {
+  architecture: 'gemma3' | 'qwen35';
   hidden: number; intermediate: number; layers: number; heads: number; kvHeads: number; headDim: number;
   vocab: number; epsilon: number; theta: number; localTheta: number; window: number; period: number;
   attentionScale: number; ropeScale: number; name: string; parameters: number;
+  rotaryDim: number;
+  recurrent?: { keyHeads: number; valueHeads: number; headDim: number; convKernel: number; layers: boolean[] };
 }
 export function modelConfig(g: GGUF): ModelConfig {
-  if (g.metadata.get('general.architecture') !== 'gemma3') throw new Error('This runtime currently implements Gemma 3 text inference. Other model architectures are rejected explicitly.');
+  const architecture = g.metadata.get('general.architecture');
+  if (architecture !== 'gemma3' && architecture !== 'qwen35') throw new Error('Supported text architectures: Gemma 3 and Qwen3.8 (qwen35 GGUF).');
   const num = (key: string, fallback?: number) => {
-    const v = Number(g.metadata.get(`gemma3.${key}`) ?? fallback);
-    if (!Number.isFinite(v) || v <= 0) throw new Error(`Missing or invalid Gemma 3 metadata: ${key}.`);
+    const v = Number(g.metadata.get(`${architecture}.${key}`) ?? fallback);
+    if (!Number.isFinite(v) || v <= 0) throw new Error(`Missing or invalid ${architecture} metadata: ${key}.`);
     return v;
   };
-  const layers = num('block_count'), hidden = num('embedding_length'), heads = num('attention.head_count');
+  const extra = architecture === 'qwen35' ? Number(g.metadata.get('qwen35.nextn_predict_layers') ?? 0) : 0;
+  if (!Number.isInteger(extra) || extra < 0 || extra > 8) throw new Error('Invalid prediction layer count.');
+  const layers = num('block_count') - extra, hidden = num('embedding_length'), heads = num('attention.head_count');
   const headDim = num('attention.key_length');
   const cfg: ModelConfig = {
-    hidden, layers, heads, headDim, kvHeads: num('attention.head_count_kv'), intermediate: num('feed_forward_length'),
+    architecture, hidden, layers, heads, headDim, kvHeads: num('attention.head_count_kv'), intermediate: num('feed_forward_length'),
     vocab: g.tensors.get('token_embd.weight')?.dims[1] ?? 0, epsilon: num('attention.layer_norm_rms_epsilon', 1e-6),
     theta: num('rope.freq_base', 1_000_000), localTheta: num('rope.local.freq_base', 10_000),
-    window: num('attention.sliding_window', 1024), period: 6,
-    attentionScale: 1 / Math.sqrt(layers === 62 ? hidden / heads : headDim),
+    window: num('attention.sliding_window', 1024), period: architecture === 'gemma3' ? 6 : num('full_attention_interval', 4),
+    attentionScale: 1 / Math.sqrt(architecture === 'gemma3' && layers === 62 ? hidden / heads : headDim),
     ropeScale: 1 / num('rope.scaling.factor', 1),
-    name: String(g.metadata.get('general.name') ?? 'Gemma 3'), parameters: g.parameters,
+    name: String(g.metadata.get('general.name') ?? architecture), parameters: g.parameters,
+    rotaryDim: architecture === 'gemma3' ? headDim : num('rope.dimension_count'),
   };
-  if (heads % cfg.kvHeads || headDim % 2 || !cfg.vocab || layers > 128 || hidden > 16384 || cfg.intermediate > 131072 || cfg.vocab > 1_000_000) throw new Error('Unsupported Gemma 3 dimensions.');
+  if ([layers, hidden, heads, headDim, cfg.kvHeads, cfg.intermediate, cfg.period, cfg.rotaryDim].some(n => !Number.isInteger(n) || n < 1) || heads % cfg.kvHeads || headDim % 2 || cfg.rotaryDim % 2 || cfg.rotaryDim > headDim || !cfg.vocab || layers > 128 || heads > 256 || headDim > 512 || hidden > 16384 || cfg.intermediate > 131072 || cfg.vocab > 1_000_000) throw new Error('Unsupported model dimensions.');
+  if (architecture === 'qwen35') {
+    const flags = g.metadata.get('qwen35.attention.recurrent_layers');
+    if (flags !== undefined && (!Array.isArray(flags) || flags.length !== layers + extra || flags.some(v => typeof v !== 'boolean'))) throw new Error('Invalid recurrent layer map.');
+    cfg.recurrent = { keyHeads: num('ssm.group_count'), valueHeads: num('ssm.time_step_rank'), headDim: num('ssm.state_size'), convKernel: num('ssm.conv_kernel'), layers: Array.from({ length: layers }, (_, i) => Array.isArray(flags) ? flags[i] : (i + 1) % cfg.period !== 0) };
+    const r = cfg.recurrent;
+    if ([r.keyHeads, r.valueHeads, r.headDim, r.convKernel].some(n => !Number.isInteger(n)) || r.valueHeads % r.keyHeads || r.valueHeads > 128 || r.headDim > 256 || r.convKernel > 16 || num('ssm.inner_size') !== r.valueHeads * r.headDim) throw new Error('Unsupported recurrent dimensions.');
+    // MTP weights are stored in this GGUF but do not participate in ordinary decoding.
+    cfg.parameters = [...g.tensors.values()].filter(t => !t.name.startsWith('blk.') || Number(t.name.split('.')[1]) < layers).reduce((s, t) => s + t.dims.reduce((a, b) => a * b, 1), 0);
+  }
   const shape = (name: string, dims: number[]) => {
     const t = g.tensors.get(name);
     if (!t || t.dims.join(',') !== dims.join(',')) throw new Error(`Missing or invalid tensor ${name}.`);
@@ -113,11 +129,20 @@ export function modelConfig(g: GGUF): ModelConfig {
   if (g.tensors.has('output.weight')) shape('output.weight', [hidden, cfg.vocab]);
   for (let l = 0; l < layers; l++) {
     const prefix = `blk.${l}.`;
-    for (const key of ['attn_norm', 'post_attention_norm', 'ffn_norm', 'post_ffw_norm']) shape(prefix + key + '.weight', [hidden]);
-    for (const key of ['attn_q_norm', 'attn_k_norm']) shape(prefix + key + '.weight', [headDim]);
-    shape(prefix + 'attn_q.weight', [hidden, heads * headDim]);
-    for (const key of ['attn_k', 'attn_v']) shape(prefix + key + '.weight', [hidden, cfg.kvHeads * headDim]);
-    shape(prefix + 'attn_output.weight', [heads * headDim, hidden]);
+    for (const key of architecture === 'gemma3' ? ['attn_norm', 'post_attention_norm', 'ffn_norm', 'post_ffw_norm'] : ['attn_norm', 'post_attention_norm']) shape(prefix + key + '.weight', [hidden]);
+    if (cfg.recurrent?.layers[l]) {
+      const r = cfg.recurrent, value = r.valueHeads * r.headDim, channels = 2 * r.keyHeads * r.headDim + value;
+      shape(prefix + 'attn_qkv.weight', [hidden, channels]); shape(prefix + 'attn_gate.weight', [hidden, value]);
+      shape(prefix + 'ssm_conv1d.weight', [r.convKernel, channels]);
+      for (const key of ['ssm_alpha', 'ssm_beta']) shape(prefix + key + '.weight', [hidden, r.valueHeads]);
+      shape(prefix + 'ssm_a', [r.valueHeads]); shape(prefix + 'ssm_dt.bias', [r.valueHeads]);
+      shape(prefix + 'ssm_norm.weight', [r.headDim]); shape(prefix + 'ssm_out.weight', [value, hidden]);
+    } else {
+      for (const key of ['attn_q_norm', 'attn_k_norm']) shape(prefix + key + '.weight', [headDim]);
+      shape(prefix + 'attn_q.weight', [hidden, heads * headDim * (architecture === 'qwen35' ? 2 : 1)]);
+      for (const key of ['attn_k', 'attn_v']) shape(prefix + key + '.weight', [hidden, cfg.kvHeads * headDim]);
+      shape(prefix + 'attn_output.weight', [heads * headDim, hidden]);
+    }
     for (const key of ['ffn_gate', 'ffn_up']) shape(prefix + key + '.weight', [hidden, cfg.intermediate]);
     shape(prefix + 'ffn_down.weight', [cfg.intermediate, hidden]);
   }

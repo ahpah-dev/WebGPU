@@ -4,6 +4,8 @@ import { readGGUF, modelConfig, type GGUF, type ModelConfig, type Tensor } from 
 import { WeightPager, type PagingStats } from './pager.ts';
 import { decodeWeight } from './quant.ts';
 import { Tokenizer } from './tokenizer.ts';
+import { QwenTokenizer } from './qwen-tokenizer.ts';
+import { qwenKernels } from './qwen-shaders.ts';
 import { matmulShader, normShader, ropeShader, attentionShader, addShader, geluShader } from './shaders.ts';
 
 export interface LoadOptions { gpuBudgetMiB?: number; contextLength?: number; batchSize?: number }
@@ -18,11 +20,12 @@ export class PagedEngine {
   private source!: ByteSource;
   private gguf!: GGUF;
   private config!: ModelConfig;
-  private tokenizer!: Tokenizer;
+  private tokenizer!: Tokenizer | QwenTokenizer;
   private pager!: WeightPager;
   private work: Record<string, GPUBuffer> = {};
   private norms = new Map<string, GPUBuffer>();
-  private kv: { k: GPUBuffer; v: GPUBuffer }[] = [];
+  private kv: ({ k: GPUBuffer; v: GPUBuffer } | undefined)[] = [];
+  private recurrent = new Map<number, { conv: GPUBuffer; state: GPUBuffer }>();
   private mm = new Map<number, GPUComputePipeline>();
   private kernels: Record<string, GPUComputePipeline> = {};
   private context = 512;
@@ -41,9 +44,12 @@ export class PagedEngine {
     if (!Number.isInteger(this.budget) || this.budget < 512 || this.budget > 16384) throw new Error('GPU budget must be 512–16384 MiB.');
     this.source = makeSource(input);
     this.progress({ phase: 'loading', detail: 'Reading GGUF metadata and tokenizer', fraction: 0.05 });
-    this.gguf = await readGGUF(this.source, signal); this.config = modelConfig(this.gguf); this.tokenizer = new Tokenizer(this.gguf.metadata);
-    const c = this.config, kvBytes = c.layers * this.context * c.kvHeads * c.headDim * 8;
-    if (kvBytes + 96 * MiB > this.budget * MiB) throw new Error(`This context needs about ${Math.ceil(kvBytes / MiB)} MiB for its KV cache. Reduce context length or increase the GPU budget.`);
+    this.gguf = await readGGUF(this.source, signal); this.config = modelConfig(this.gguf);
+    this.tokenizer = this.config.architecture === 'qwen35' ? new QwenTokenizer(this.gguf.metadata) : new Tokenizer(this.gguf.metadata);
+    const c = this.config, r = c.recurrent, recurrentLayers = r?.layers.filter(Boolean).length ?? 0;
+    const kvBytes = (c.layers - recurrentLayers) * this.context * c.kvHeads * c.headDim * 8;
+    const stateBytes = r ? recurrentLayers * (r.valueHeads * r.headDim ** 2 + (2 * r.keyHeads + r.valueHeads) * r.headDim * (r.convKernel - 1)) * 4 : 0;
+    if (kvBytes + stateBytes + 96 * MiB > this.budget * MiB) throw new Error(`This context needs about ${Math.ceil((kvBytes + stateBytes) / MiB)} MiB for attention state. Reduce context length or increase the GPU budget.`);
     this.gpu = new Compute(this.budget);
     try {
       await this.gpu.init(); signal?.throwIfAborted();
@@ -51,14 +57,19 @@ export class PagedEngine {
       const types = new Set([...this.gguf.tensors.values()].filter(t => t.dims.length === 2).map(t => t.type));
       for (const type of types) this.mm.set(type, await this.gpu.pipeline(matmulShader(type), `quantized matmul ${type}`));
       for (const [name, code] of Object.entries({ norm: normShader, rope: ropeShader, attention: attentionShader(this.context), add: addShader, gelu: geluShader })) this.kernels[name] = await this.gpu.pipeline(code, name);
-      const sizes = { hidden: c.hidden, normed: c.hidden, q: c.heads * c.headDim, k: c.kvHeads * c.headDim, v: c.kvHeads * c.headDim, attention: c.heads * c.headDim, projection: c.hidden, gate: c.intermediate, up: c.intermediate, product: c.intermediate, down: c.hidden };
+      if (r) for (const [name, code] of Object.entries(qwenKernels)) this.kernels[name] = await this.gpu.pipeline(code, name);
+      const sizes: Record<string, number> = { hidden: c.hidden, normed: c.hidden, q: c.heads * c.headDim, k: c.kvHeads * c.headDim, v: c.kvHeads * c.headDim, attention: c.heads * c.headDim, projection: c.hidden, gate: c.intermediate, up: c.intermediate, product: c.intermediate, down: c.hidden };
+      if (r) Object.assign(sizes, { qg: 2 * c.heads * c.headDim, attnGate: c.heads * c.headDim, qkv: (2 * r.keyHeads + r.valueHeads) * r.headDim, convolved: (2 * r.keyHeads + r.valueHeads) * r.headDim, z: r.valueHeads * r.headDim, alpha: r.valueHeads, beta: r.valueHeads, control: 2 * r.valueHeads, recOutput: r.valueHeads * r.headDim, recNorm: r.valueHeads * r.headDim });
       for (const [name, n] of Object.entries(sizes)) this.work[name] = this.gpu.buffer(this.batch * n * 4, name);
       this.work.logits = this.gpu.buffer(c.vocab * 4, 'logits');
-      for (let layer = 0; layer < c.layers; layer++) this.kv.push({ k: this.gpu.buffer(this.context * c.kvHeads * c.headDim * 4, `K ${layer}`), v: this.gpu.buffer(this.context * c.kvHeads * c.headDim * 4, `V ${layer}`) });
-      const norms = [...this.gguf.tensors.values()].filter(t => t.dims.length === 1);
+      for (let layer = 0; layer < c.layers; layer++) {
+        if (r?.layers[layer]) this.recurrent.set(layer, { conv: this.gpu.buffer((2 * r.keyHeads + r.valueHeads) * r.headDim * (r.convKernel - 1) * 4, `convolution state ${layer}`), state: this.gpu.buffer(r.valueHeads * r.headDim ** 2 * 4, `recurrent state ${layer}`) });
+        else this.kv[layer] = { k: this.gpu.buffer(this.context * c.kvHeads * c.headDim * 4, `K ${layer}`), v: this.gpu.buffer(this.context * c.kvHeads * c.headDim * 4, `V ${layer}`) };
+      }
+      const norms = [...this.gguf.tensors.values()].filter(t => (t.dims.length === 1 || t.name.endsWith('ssm_conv1d.weight')) && (!t.name.startsWith('blk.') || Number(t.name.split('.')[1]) < c.layers));
       for (let i = 0; i < norms.length; i++) {
         signal?.throwIfAborted(); const t = norms[i];
-        const bytes = await this.source.read(t.offset, t.bytes, signal), values = new Float32Array(t.dims[0]);
+        const bytes = await this.source.read(t.offset, t.bytes, signal), values = new Float32Array(t.dims.reduce((a, b) => a * b, 1));
         for (let j = 0; j < values.length; j++) values[j] = decodeWeight(bytes, t.type, j);
         const b = this.gpu.buffer(values.byteLength, t.name); this.gpu.write(b, values); this.norms.set(t.name, b);
         if (i % 20 === 0) this.progress({ phase: 'loading', detail: 'Loading normalization vectors', fraction: 0.5 + 0.45 * i / norms.length });
@@ -90,20 +101,24 @@ export class PagedEngine {
     const embedding = this.tensor('token_embd.weight'), input = new Float32Array(n * c.hidden);
     for (let b = 0; b < n; b++) {
       const row = await this.source.read(embedding.offset + ids[b] * embedding.rowBytes, embedding.rowBytes, signal);
-      for (let i = 0; i < c.hidden; i++) input[b * c.hidden + i] = decodeWeight(row, embedding.type, i) * Math.sqrt(c.hidden);
+      for (let i = 0; i < c.hidden; i++) input[b * c.hidden + i] = decodeWeight(row, embedding.type, i) * (c.architecture === 'gemma3' ? Math.sqrt(c.hidden) : 1);
     }
     this.gpu.write(w.hidden, input);
     for (let l = 0; l < c.layers; l++) {
       signal?.throwIfAborted(); const prefix = `blk.${l}.`, local = l % c.period !== c.period - 1;
       this.progress({ phase: start + n > 1 && n > 1 ? 'prefill' : 'generating', detail: `Layer ${l + 1} / ${c.layers} · token ${start + 1}${n > 1 ? `–${start + n}` : ''}`, fraction: l / c.layers, layer: l, stats: this.pager.snapshot() });
       this.norm(w.hidden, w.normed, prefix + 'attn_norm.weight', n);
+      if (c.architecture === 'qwen35') {
+        await this.qwenLayer(l, n, start, signal);
+        await this.gpu.done(); this.pendingPages = 0; continue;
+      }
       await this.linear(prefix + 'attn_q.weight', w.normed, w.q, n, signal);
       await this.linear(prefix + 'attn_k.weight', w.normed, w.k, n, signal);
       await this.linear(prefix + 'attn_v.weight', w.normed, w.v, n, signal);
       for (const [name, heads] of [['q', c.heads], ['k', c.kvHeads]] as const) this.gpu.run(this.kernels.rope, [w[name], this.norms.get(prefix + `attn_${name}_norm.weight`)!], [heads, c.headDim, start, { f: local ? c.localTheta : c.theta }, { f: local ? 1 : c.ropeScale }, { f: c.epsilon }, 0, 0], heads, n);
       const kvStride = c.kvHeads * c.headDim * 4;
-      this.gpu.copy(w.k, this.kv[l].k, n * kvStride, 0, start * kvStride); this.gpu.copy(w.v, this.kv[l].v, n * kvStride, 0, start * kvStride);
-      this.gpu.run(this.kernels.attention, [w.q, this.kv[l].k, this.kv[l].v, w.attention], [c.heads, c.kvHeads, c.headDim, start, { f: c.attentionScale }, local ? c.window : this.context, 0, 0], c.heads, n);
+      this.gpu.copy(w.k, this.kv[l]!.k, n * kvStride, 0, start * kvStride); this.gpu.copy(w.v, this.kv[l]!.v, n * kvStride, 0, start * kvStride);
+      this.gpu.run(this.kernels.attention, [w.q, this.kv[l]!.k, this.kv[l]!.v, w.attention], [c.heads, c.kvHeads, c.headDim, start, { f: c.attentionScale }, local ? c.window : this.context, 0, 0], c.heads, n);
       await this.linear(prefix + 'attn_output.weight', w.attention, w.projection, n, signal);
       this.norm(w.projection, w.normed, prefix + 'post_attention_norm.weight', n);
       this.gpu.run(this.kernels.add, [w.normed, w.hidden], [n * c.hidden], Math.ceil(n * c.hidden / 256));
@@ -121,6 +136,40 @@ export class PagedEngine {
     await this.linear(this.gguf.tensors.has('output.weight') ? 'output.weight' : 'token_embd.weight', w.normed, w.logits, 1, signal, n - 1);
     return new Float32Array(await this.gpu.read(w.logits, c.vocab * 4));
   }
+  private async qwenLayer(layer: number, n: number, start: number, signal?: AbortSignal) {
+    const c = this.config, r = c.recurrent!, w = this.work, prefix = `blk.${layer}.`;
+    if (r.layers[layer]) {
+      const state = this.recurrent.get(layer)!, channels = (2 * r.keyHeads + r.valueHeads) * r.headDim;
+      await this.linear(prefix + 'attn_qkv.weight', w.normed, w.qkv, n, signal);
+      await this.linear(prefix + 'attn_gate.weight', w.normed, w.z, n, signal);
+      await this.linear(prefix + 'ssm_alpha.weight', w.normed, w.alpha, n, signal);
+      await this.linear(prefix + 'ssm_beta.weight', w.normed, w.beta, n, signal);
+      this.gpu.run(this.kernels.conv, [w.qkv, this.norms.get(prefix + 'ssm_conv1d.weight')!, state.conv, w.convolved], [channels, r.convKernel, n], Math.ceil(channels / 256));
+      this.gpu.run(this.kernels.l2, [w.convolved], [channels, r.headDim, { f: 1e-6 }], 2 * r.keyHeads, n);
+      this.gpu.run(this.kernels.decay, [w.alpha, w.beta, this.norms.get(prefix + 'ssm_a')!, this.norms.get(prefix + 'ssm_dt.bias')!, w.control], [n * r.valueHeads, r.valueHeads], Math.ceil(n * r.valueHeads / 256));
+      this.gpu.run(this.kernels.delta, [w.convolved, w.control, state.state, w.recOutput], [r.headDim, r.keyHeads, r.valueHeads, n], r.valueHeads * r.headDim);
+      this.gpu.run(this.kernels.normGate, [w.recOutput, this.norms.get(prefix + 'ssm_norm.weight')!, w.z, w.recNorm], [r.headDim, { f: c.epsilon }], n * r.valueHeads);
+      await this.linear(prefix + 'ssm_out.weight', w.recNorm, w.projection, n, signal);
+    } else {
+      await this.linear(prefix + 'attn_q.weight', w.normed, w.qg, n, signal);
+      this.gpu.run(this.kernels.splitQuery, [w.qg, w.q, w.attnGate], [n * c.heads * c.headDim, c.headDim], Math.ceil(n * c.heads * c.headDim / 256));
+      await this.linear(prefix + 'attn_k.weight', w.normed, w.k, n, signal);
+      await this.linear(prefix + 'attn_v.weight', w.normed, w.v, n, signal);
+      for (const [name, heads] of [['q', c.heads], ['k', c.kvHeads]] as const) this.gpu.run(this.kernels.rope, [w[name], this.norms.get(prefix + `attn_${name}_norm.weight`)!], [heads, c.headDim, start, { f: c.theta }, { f: c.ropeScale }, { f: c.epsilon }, c.rotaryDim, 0], heads, n);
+      const kv = this.kv[layer]!, stride = c.kvHeads * c.headDim * 4;
+      this.gpu.copy(w.k, kv.k, n * stride, 0, start * stride); this.gpu.copy(w.v, kv.v, n * stride, 0, start * stride);
+      this.gpu.run(this.kernels.attention, [w.q, kv.k, kv.v, w.attention], [c.heads, c.kvHeads, c.headDim, start, { f: c.attentionScale }, this.context, 0, 0], c.heads, n);
+      this.gpu.run(this.kernels.sigmoidGate, [w.attnGate, w.attention], [n * c.heads * c.headDim], Math.ceil(n * c.heads * c.headDim / 256));
+      await this.linear(prefix + 'attn_output.weight', w.attention, w.projection, n, signal);
+    }
+    this.gpu.run(this.kernels.add, [w.projection, w.hidden], [n * c.hidden], Math.ceil(n * c.hidden / 256));
+    this.norm(w.hidden, w.normed, prefix + 'post_attention_norm.weight', n);
+    await this.linear(prefix + 'ffn_gate.weight', w.normed, w.gate, n, signal);
+    await this.linear(prefix + 'ffn_up.weight', w.normed, w.up, n, signal);
+    this.gpu.run(this.kernels.silu, [w.gate, w.up, w.product], [n * c.intermediate], Math.ceil(n * c.intermediate / 256));
+    await this.linear(prefix + 'ffn_down.weight', w.product, w.down, n, signal);
+    this.gpu.run(this.kernels.add, [w.down, w.hidden], [n * c.hidden], Math.ceil(n * c.hidden / 256));
+  }
   async *generate(messages: Message[], options: GenerationOptions = {}, signal?: AbortSignal): AsyncGenerator<TokenEvent> {
     if (this.busy) throw new Error('A generation is already running.');
     if (this.disposed || !this.pager) throw new Error('Load a model first.');
@@ -137,6 +186,12 @@ export class PagedEngine {
       while (shared < prompt.length && shared < this.tokensInCache.length && prompt[shared] === this.tokensInCache[shared]) shared++;
       // Last prompt token must be evaluated to obtain logits even for an exact-prefix retry.
       shared = Math.min(shared, prompt.length - 1);
+      // A recurrent state cannot be rewound like a KV cache. Rebuild on every new
+      // request so edits, retries, cancellation and multi-turn chat are deterministic.
+      if (this.config.recurrent) {
+        shared = 0;
+        this.gpu.clear([...this.recurrent.values()].flatMap(s => [s.conv, s.state]));
+      }
       let values: Float32Array | undefined;
       const started = performance.now();
       this.tokensInCache = this.tokensInCache.slice(0, shared);

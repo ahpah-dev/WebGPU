@@ -1,6 +1,6 @@
 # WebGPU
 
-**A browser-native, paged inference runtime for Gemma 3 — including 27B.**
+**A browser-native, paged inference runtime for Qwen3.8 27B and Gemma 3.**
 
 WebGPU reads a local GGUF in small ranges and runs quantized transformer computations in WGSL shaders. It keeps a bounded portion of the model on the GPU and streams the rest from the local file. A model does not have to fit completely in VRAM or JavaScript memory.
 
@@ -8,9 +8,11 @@ This is an experimental runtime with a working browser UI and JavaScript SDK. It
 
 **Verified:** Gemma 3 27B generated `Paris` entirely in the browser with a **2 GiB engine buffer budget**, peaking at **1.983 GiB** of tracked GPU allocations on an RTX 5070. The one-token SDK smoke test took **120 seconds**, including prompt processing; 108 seconds were spent awaiting weight reads. This is a working experimental memory-saving runtime, not a promise of fast inference. See [measured results, screenshots, and test limits](docs/VALIDATION.md).
 
+**Qwen3.8 27B verified:** the Q4_K_M model also generated `Paris` in the browser with a **2 GiB budget**, peaking at **1.985 GiB**. Its one-token SDK test took **181.9 seconds**, including the 23-token prompt; 164.8 seconds were spent awaiting weight reads. [Raw Qwen result](docs/qwen38-benchmark.json).
+
 ## Use it
 
-Open [WebGPU](https://ahpah-dev.github.io/WebGPU/) in a browser with WebGPU hardware acceleration. Choose a local **Gemma 3 GGUF** file, select your GPU allocation budget, and send a message. The selected file is read directly by a worker through the browser File API. It is never uploaded.
+Open [WebGPU](https://ahpah-dev.github.io/WebGPU/) in a browser with WebGPU hardware acceleration. Choose a local **Qwen3.8 27B or Gemma 3 GGUF** file, select your GPU allocation budget, and send a message. The model architecture is detected from the file. The selected file is read directly by a worker through the browser File API. It is never uploaded.
 
 Start with a **2 GiB budget** and **512-token context**. The GPU must have additional headroom for the browser, driver, display, and temporary upload staging. The app does not automatically know how much free VRAM your browser can use.
 
@@ -35,6 +37,15 @@ For development, `npm run dev` runs Vite. Use the file picker in development; th
 ### Use weights already downloaded by Ollama
 
 ```sh
+ollama pull qwen3.8:27b
+npm start -- --ollama-model qwen3.8:27b
+```
+
+Click **Use qwen3.8:27b.gguf**. Qwen3.8 uses **non-thinking text chat** in this runtime, leaving the limited context for the answer. Its GGUF architecture is named `qwen35`; this is the correct architecture identifier for Qwen3.8, not a model substitution. The 64 text layers run; the optional MTP prediction layer and image projector are not evaluated.
+
+Gemma 3 also works:
+
+```sh
 ollama pull gemma3:27b
 npm start -- --ollama-model gemma3:27b
 ```
@@ -45,7 +56,7 @@ Click **Use gemma3:27b.gguf**. The server locates Ollama's local manifest and ex
 npm start -- --model /absolute/path/to/gemma-3-27b-it-Q4_K_M.gguf
 ```
 
-The Ollama 27B text weights are about **16.6 GB** (15.42 GiB); an Ollama pull can also download an image projector that this text-only engine does not use. You need disk space for the complete model. Weights are not bundled in this repository, and their own license applies.
+The Ollama Qwen3.8 27B GGUF is about **16.8 GB** (15.66 GiB); Gemma 3 27B is about **16.6 GB** (15.42 GiB). An Ollama pull can also download an image projector that this text-only engine does not use. You need disk space for the complete model. Weights are not bundled in this repository, and their own license applies.
 
 ## The mechanism
 
@@ -53,9 +64,10 @@ The Ollama 27B text weights are about **16.6 GB** (15.42 GiB); an Ollama pull ca
 2. **Quantized kernels.** F32, F16, Q4_0, Q8_0, Q4_K, Q5_K, and Q6_K matrix multiplication decodes blocks on the GPU. The model's mixed tensor types remain quantized in storage and VRAM.
 3. **Bounded weight pager.** A reusable 16 MiB slot streams uncached weight pages. A fixed resident prefix uses the remaining budget; it avoids the repeated full-cache eviction of naive LRU on sequential transformer scans.
 4. **Ordered uploads.** GPU writes and dispatches are ordered. Fences after at most eight pages bound queued staging and allow uploads to overlap prior computation. Each transformer layer completes before progress advances.
-5. **Batched prompt processing.** Up to 32 prompt tokens reuse each weight page. A GPU KV cache and prefix reuse avoid recomputing already cached conversation tokens.
+5. **Batched prompt processing.** Up to 32 prompt tokens reuse each weight page. Gemma uses a GPU KV cache and conversation prefix reuse. Qwen retains KV state for full-attention layers and fixed-size recurrent/convolution state for its other layers. It rebuilds the prompt state for each new request so edited prompts, retries, and cancellation cannot reuse stale recurrent state.
 6. **Gemma 3 decoder.** Implements embedding scaling, RMS normalization, Q/K normalization, local/global RoPE, grouped-query causal/sliding attention, residual connections, GELU feed-forward layers, and the tied output projection. The 27B attention scale is handled separately.
-7. **Dedicated worker.** Sampling and tokenization run in JavaScript; transformer matrix/attention operations run on WebGPU. Both remain inside the browser. Stop cancels at the next asynchronous boundary, and disposal terminates the worker.
+7. **Qwen3.8 decoder.** Implements causal depthwise convolution, L2-normalized Q/K, Gated DeltaNet with tiled GGUF value heads, gated RMS normalization, interleaved Q/gate projection, partial RoPE, gated grouped-query attention, SwiGLU, and the untied output projection. The tokenizer uses NFC normalization and ranked byte BPE with explicit non-thinking ChatML framing.
+8. **Dedicated worker.** Sampling and tokenization run in JavaScript; transformer matrix/attention operations run on WebGPU. Both remain inside the browser. Stop cancels at the next asynchronous boundary, and disposal terminates the worker.
 
 The GPU budget counts buffers allocated by this engine. It is **not a measurement of total process VRAM**: browser/driver allocations and temporary upload staging are additional. The runtime panel distinguishes file size, cumulative disk reads, resident cache hits, and tracked allocations.
 
@@ -100,16 +112,17 @@ npm run build
 npm start -- --ollama-model gemma3:27b
 ```
 
-Open `http://127.0.0.1:8787/verify.html` and select **Run kernel checks**. These checks execute real WebGPU kernels and compare their results with CPU references for all seven tensor types, batched/offset matrix operations, causal and sliding attention, RMS norm, and scaled RoPE. The standalone SDK smoke test loads local model bytes and generates text; it is not a mocked inference test.
+Open `http://127.0.0.1:8787/verify.html` and select **Run kernel checks**. These checks execute real WebGPU kernels and compare their results with CPU references for all seven tensor types, batched/offset matrix operations, causal and sliding attention, RMS norm, and scaled RoPE. Qwen checks cover interleaved query/gates, causal convolution history, decay, recurrent state, batch versus sequential DeltaNet, gated normalization, SwiGLU, and partial RoPE. The standalone SDK smoke test loads whichever local model the byte server exposes and generates text; it is not a mocked inference test.
 
-CPU tests cover independently packed quantization fixtures, non-finite sampling rejection, file bounds, HTTP range enforcement, and invalid GGUF headers. GitHub Actions runs these tests and the production build before publishing the static application.
+CPU tests cover independently packed quantization fixtures, non-finite sampling rejection, file bounds, HTTP range enforcement, invalid GGUF headers, real Qwen3.8 tensor shapes, MTP exclusion, and 17 reference tokenizer cases from Hugging Face's tokenizer. GitHub Actions runs these tests and the production build before publishing the static application.
 
 ## Current scope
 
-- Implements the **Gemma 3** dense text architecture, targeting its 27B GGUF. Other Gemma 3 sizes use the same decoder, but are not all validated on hardware.
+- Implements **Qwen3.8 27B** (`qwen35` GGUF) hybrid text inference and **Gemma 3** dense text inference. Other sizes sharing those architectures are not all validated on hardware. Ordinary Qwen3, Qwen3 MoE, and other architecture identifiers are rejected.
+- Qwen chat runs in non-thinking mode. Images, video, tool execution, speculative MTP decoding, and extended reasoning controls are not exposed.
 - Does not implement arbitrary model architectures, image/audio encoders, split GGUF files, or every GGML quantization format.
 - Does not provide a CPU-only fallback if WebGPU is unavailable.
-- Uses a full f32 KV cache, including local layers; long contexts use more memory. The architecture's advertised 128K context is not the runtime's current supported limit.
+- Uses f32 attention state. Gemma caches all layers, including local layers; Qwen allocates KV only for full-attention layers, plus fixed recurrent state. Context is limited to 256–2048 tokens here, regardless of a model's advertised context.
 - Conversations live in page memory and disappear on reload. Use Export to save a transcript.
 - Model loading, token generation, and paging performance vary substantially with hardware and browser. It does not promise fast 27B inference on every GPU.
 
@@ -117,4 +130,6 @@ CPU tests cover independently packed quantization fixtures, non-finite sampling 
 
 The runtime is implemented in TypeScript and WGSL. GGUF and quantization block layouts follow [GGML/llama.cpp](https://github.com/ggml-org/llama.cpp); Gemma 3 computations follow its [model implementation](https://github.com/ggml-org/llama.cpp/blob/master/src/models/gemma3.cpp) and [Google's Gemma reference](https://github.com/google/gemma_pytorch). [svenflow/webgpu-gemma](https://github.com/svenflow/webgpu-gemma) was a design reference for browser Gemma execution; this project's bounded paging engine, block kernels, and SDK are implemented here.
 
-Code: [MIT](LICENSE). Model weights retain their original terms, including [Gemma's terms](https://ai.google.dev/gemma/terms). No model weights are redistributed by this repository.
+Qwen's architecture and tokenizer follow the [official Qwen3.8 model](https://huggingface.co/Qwen/Qwen3.8-27B), [Transformers reference](https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_5/modeling_qwen3_5.py), and [GGUF conversion conventions](https://github.com/ggml-org/llama.cpp/blob/master/conversion/qwen.py), including its value-head permutation and already adjusted normalization weights.
+
+Code: [MIT](LICENSE). Model weights retain their original terms, including [Qwen3.8's Apache 2.0 license](https://huggingface.co/Qwen/Qwen3.8-27B/blob/main/LICENSE) and [Gemma's terms](https://ai.google.dev/gemma/terms). No model weights are redistributed by this repository. The small tokenizer test fixture contains vocabulary entries and merge rules derived from the Apache-licensed Qwen tokenizer for interoperability checks.
