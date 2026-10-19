@@ -1,5 +1,15 @@
 # Validation — 2026-10-19
 
+## Interface rework (0.7.0)
+
+The green interface was replaced with a monochrome, OpenAI-style system: near-black ink on white surfaces, hairline borders, 6–10px radii, black primary actions, monospace labels and values, and a faint 32px drafting grid. Pixel detail is deliberate and restrained — a pixel chip illustration in the hero, a pixel mark shared with the favicon, square status dots, stepped nav markers, and a pixel-grid placeholder for empty layer maps. Colour is now semantic only: red for errors and destructive hover states.
+
+Verified in headless Chrome at 1440×980 and 390×844:
+- All four pages render with no console errors or exceptions; the previous wrapping bug in the phone header (badge text colliding with the API chip) is fixed, and the model library dialog matches the new tokens.
+- Chat styling separates a right-aligned user bubble from full-width assistant text, checked with a two-message fixture.
+- Contrast and hierarchy hold at both widths; screenshots are regenerated from this build: [playground](playground.png), [chat](chat.png), [model library](models.png), [library dialog](library.png), [developer API](api.png), [phone](phone.png).
+- 67 Node tests and the production build still pass; no engine, tokenizer, or bridge behaviour changed.
+
 ## Small dense models in the browser
 
 The dense decoder (`llama`, `qwen2`, `qwen3`) was checked against an independent CPU reference on real WebGPU hardware, not by reading the source.

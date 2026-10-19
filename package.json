@@ -1,6 +1,6 @@
 {
   "name": "webgpu-paged",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "private": true,
   "type": "module",
   "description": "Browser-native, paged Qwen3.8 27B and Gemma 3 inference for models larger than GPU memory.",

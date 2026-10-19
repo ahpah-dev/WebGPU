@@ -23,6 +23,28 @@ const icons: Record<string, string> = {
   disk: '<rect x="3" y="5" width="18" height="14" rx="3"/><path d="M3 13h18M7 16h1m3 0h1"/>',
 };
 const icon = (name: string, cls = '') => `<svg class="icon ${cls}" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name] ?? icons.box}</svg>`;
+/** Mark: the same crisp W as the site icon, drawn as square-joined strokes. */
+const brandmark = '<svg viewBox="0 0 28 24" aria-hidden="true"><path d="M4 5l5 14 5-11 5 11 5-14" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="square" stroke-linejoin="miter"/></svg>';
+/** Hero illustration: a chip package, pin rows and a pixel die, all on one grid. */
+function pixelDie(): string {
+  const pins: string[] = [];
+  for (let i = 0; i < 8; i++) pins.push(`<rect x="${44 + i * 20}" y="12" width="7" height="12"/>`, `<rect x="${44 + i * 20}" y="166" width="7" height="12"/>`);
+  for (let i = 0; i < 7; i++) pins.push(`<rect x="12" y="${34 + i * 18}" width="12" height="7"/>`, `<rect x="216" y="${34 + i * 18}" width="12" height="7"/>`);
+  const cells: string[] = [], stripe: string[] = [];
+  for (let row = 0; row < 6; row++) for (let column = 0; column < 8; column++) {
+    const x = 64 + column * 14, y = 56 + row * 14;
+    cells.push(`<rect x="${x}" y="${y}" width="11" height="11" fill="#f2f2f2"/>`);
+    if (column + row === 5) stripe.push(`<rect x="${x}" y="${y}" width="11" height="11" fill="#0d0d0d"/>`);
+  }
+  return `<svg class="pixel-art" viewBox="0 0 240 190" shape-rendering="crispEdges" aria-hidden="true">
+    <g fill="#0d0d0d">${pins.join('')}</g>
+    <rect x="34" y="26" width="172" height="138" fill="#ffffff" stroke="#0d0d0d" stroke-width="2"/>
+    <rect x="56" y="48" width="128" height="94" fill="#fbfbfb" stroke="#dcdcdc" stroke-width="2"/>
+    <g>${cells.join('')}</g>
+    <g>${stripe.join('')}</g>
+    <g fill="#0d0d0d"><rect x="34" y="26" width="6" height="6"/><rect x="200" y="26" width="6" height="6"/><rect x="34" y="158" width="6" height="6"/><rect x="200" y="158" width="6" height="6"/></g>
+  </svg>`;
+}
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const gib = (n: number) => `${(n / 1024 ** 3).toFixed(2)} GiB`;
 let runtime = new WebGPU(), info: ModelInfo | undefined, busy = false, source: SourceInput | undefined;
@@ -32,8 +54,8 @@ let sharedSource: SourceInput | undefined;
 
 $('app').innerHTML = `
 <aside class="sidebar">
-  <a class="brand" aria-label="WebGPU home" href="#playground"><span class="brandmark">W</span><span>WebGPU<span class="brand-dot">.</span></span></a>
-  <span class="edition">BROWSER INFERENCE / 0.5</span>
+  <a class="brand" aria-label="WebGPU home" href="#playground"><span class="brandmark">${brandmark}</span><span>WebGPU<span class="brand-dot">.</span></span></a>
+  <span class="edition">BROWSER INFERENCE / 0.7</span>
   <button id="new-chat" aria-label="New conversation" class="new-chat">${icon('plus')}<span>New conversation</span><span class="key">↵</span></button>
   <div class="nav-label">WORKSPACE</div>
   <nav aria-label="Main navigation">
@@ -46,10 +68,10 @@ $('app').innerHTML = `
   <div class="sidebar-bottom"><span class="status-dot" id="support-dot"></span><div><strong id="support-title">Checking WebGPU</strong><small id="adapter-name">Browser compute runtime</small></div></div>
 </aside>
 <div class="shell">
-  <header><div class="breadcrumb">Workspace <span>/</span> <strong id="page-label">Playground</strong></div><div class="header-right"><button class="key-chip" data-page="api" id="key-chip" aria-label="API access and keys">${icon('code')}<span>API access</span><b id="key-chip-state">Ready</b></button><span class="local-badge"><span></span> Runs on your device</span><a href="https://github.com/ahpah-dev/WebGPU" target="_blank" rel="noreferrer" class="github-link">GitHub ${icon('link')}</a></div></header>
+  <header><div class="breadcrumb">Workspace <span>/</span> <strong id="page-label">Playground</strong></div><div class="header-right"><button class="key-chip" data-page="api" id="key-chip" aria-label="API access and keys">${icon('code')}<span>API access</span><b id="key-chip-state">standby</b></button><span class="local-badge"><span></span> Runs on your device</span><a href="https://github.com/ahpah-dev/WebGPU" target="_blank" rel="noreferrer" class="github-link">GitHub ${icon('link')}</a></div></header>
   <main>
     <section class="page active" id="page-playground">
-      <div class="page-heading"><div><div class="eyebrow"><span></span> A LITTLE LESS HARDWARE. A LOT MORE POSSIBILITY.</div><h1>Big models.<br><span>Small footprint.</span></h1><p class="intro">Local AI, right in your browser. Stream the weights.<br>Keep the intelligence on your machine.</p></div><div class="hero-art" aria-hidden="true"><div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><span class="art-node n1"></span><span class="art-node n2"></span><span class="art-node n3"></span><div class="hero-chip">${icon('chip')}<b>WebGPU</b><span>PAGED COMPUTE</span></div><div class="art-tag"><i></i> Browser native</div></div></div>
+      <div class="page-heading"><div><div class="eyebrow"><span></span> A LITTLE LESS HARDWARE. A LOT MORE POSSIBILITY.</div><h1>Big models.<br><span>Small footprint.</span></h1><p class="intro">Local AI, right in your browser. Stream the weights.<br>Keep the intelligence on your machine.</p></div><div class="hero-art" aria-hidden="true">${pixelDie()}<div class="art-tag"><i></i> Browser native · paged compute</div></div></div>
       <div class="stats-row"><div class="stat"><span class="stat-icon">${icon('box')}</span><div><label>Model parameters</label><strong id="stat-params">— <small>no model loaded</small></strong></div></div><div class="stat"><span class="stat-icon">${icon('chip')}</span><div><label>GPU allocation budget</label><strong id="stat-budget">2.0 <small>GiB</small></strong></div><span class="stat-tag">YOU SET THE LIMIT</span></div><div class="stat"><span class="stat-icon">${icon('shield')}</span><div><label>Inference location</label><strong>In your browser <span class="tiny-dot"></span></strong></div></div></div>
       <div class="workspace-grid">
         <div class="chat-panel panel"><div class="panel-top"><div class="panel-title">${icon('chat')} Conversation <span class="subtle-badge" id="chat-model">No model</span></div><button class="text-button" id="export-chat">Export ${icon('link')}</button></div>
@@ -179,6 +201,7 @@ function updateApiPanel() {
   $('bridge-clients').textContent = String(bridge.clientCount());
   $('bridge-model').textContent = info ? `${info.config.name} · ${info.config.architecture}` : 'none';
   $('key-chip-state').textContent = info ? 'live' : 'standby';
+  $('key-chip-state').dataset.state = info ? 'live' : 'standby';
 }
 function switchPage(page: string) {
   if (!['playground', 'runtime', 'models', 'api'].includes(page)) return;
