@@ -110,7 +110,7 @@ export function modelConfig(g: GGUF): ModelConfig {
   if (typeof raw !== 'string' || !raw) throw new Error('The GGUF file has no architecture metadata.');
   const architecture = raw;
   const family: Family | undefined = architecture === 'gemma3' ? 'gemma3' : architecture === 'qwen35' ? 'qwen35' : DENSE.has(architecture) ? 'llama' : undefined;
-  if (!family) throw new Error(`Supported text architectures: Gemma 3, Qwen3.8, Llama 3.x and Mistral (llama), Qwen2 and Qwen3. The ${architecture} architecture is not supported.`);
+  if (!family) throw new Error(`Supported text architectures: Gemma 3, Qwen3.5, Qwen3.8, Llama 3.x and Mistral (llama), Qwen2 and Qwen3. The ${architecture} architecture is not supported.`);
   const num = (key: string, fallback?: number) => {
     const v = Number(g.metadata.get(`${architecture}.${key}`) ?? fallback);
     if (!Number.isFinite(v) || v <= 0) throw new Error(`Missing or invalid ${architecture} metadata: ${key}.`);

@@ -1,5 +1,38 @@
 # Validation — 2026-10-19
 
+## Model catalog refresh (0.8.0)
+
+The Model library page no longer leads with Llama 3.2, Qwen2.5, and SmolLM2. It now lists what this engine can run today, newest first:
+
+- **Qwen3.5** (`qwen35`) 0.8B–4B as the recommended tier, with 9B noted as needing the Faster preset and leaving little room for buffers.
+- **Qwen3** (`qwen3`) 0.6B–8B as the current dense family.
+- **Gemma 3** (`gemma3`) 1B–12B, which is the newest Gemma this runtime executes.
+- **Qwen3.8 27B / Gemma 3 27B** as the paged tier, unchanged from 0.7.0.
+
+The page states the ceiling instead of implying it: Gemma 4 and every mixture-of-experts build are rejected at load, because the engine implements dense transformer layers and does not implement the `gemma4` architecture or MoE routing. Older dense families (Llama 3.x, Qwen2.5, SmolLM2, Mistral) still load and are named in the same note.
+
+### Qwen3.5 0.8B with real weights
+
+The dense/hybrid claims were checked against an actual checkpoint, not only synthetic fixtures. `unsloth/Qwen3.5-0.8B-Q4_K_M.gguf` (532,517,120 bytes) was served by `server/serve.mjs --model`, loaded through the built `dist/sdk/sdk.js` in headless Chrome, and generated greedily at a 512-token context on an RTX 5070:
+
+| Item | Observed value |
+| --- | --- |
+| Architecture | `qwen35`, 24 text layers, 18 recurrent |
+| Budget | 2048 MiB (Memory saver), prompt batch 16 |
+| Prompt | 23 tokens: "Name the capital of France. Answer with one word." |
+| Output | `Paris` (1 token) |
+| File reads | 0.48 GiB |
+| Peak tracked GPU buffers | 0.54 GiB |
+| Load / first token | 9.0 s / 7.4 s |
+
+The file's GGUF metadata carries the hybrid SSM keys (`ssm.conv_kernel`, `ssm.state_size`, `ssm.group_count`, `ssm.time_step_rank`, `ssm.inner_size`) and `full_attention_interval`, so it takes the same Gated-DeltaNet path as Qwen3.8 27B. Its recurrent layer map is absent from the file, so the runtime's every-fourth-layer full-attention fallback applies; the correct answer confirms that pattern for this checkpoint.
+
+`unsloth/Qwen3.5-9B-GGUF` was also inspected: it reports `qwen35` and a 5.29 GiB Q4_K_M file, which fits the Faster preset's weight budget but was not run end to end. Qwen3.5 35B-A3B and 122B-A10B are mixture-of-experts and are rejected.
+
+Gemma 4 was inspected and left out. `unsloth/gemma-4-12b-it-GGUF` reports `gemma4` with new metadata (`rope.freq_base_swa`, `attention.key_length_swa`, `attention.shared_kv_layers`, `embedding_length_per_layer_input`, `attention.sliding_window_pattern`) that this engine does not implement, so no Gemma 4 card is shown.
+
+The UI change was verified in headless Chrome at 1440×1780 and 390×2600 with no console errors; [the model library screenshot](models.png) is regenerated. 67 Node tests, `tsc --noEmit`, and the production build pass.
+
 ## Interface rework (0.7.0)
 
 The green interface was replaced with a monochrome, OpenAI-style system: near-black ink on white surfaces, hairline borders, 6–10px radii, black primary actions, monospace labels and values, and a faint 32px drafting grid. Pixel detail is deliberate and restrained — a pixel chip illustration in the hero, a pixel mark shared with the favicon, square status dots, stepped nav markers, and a pixel-grid placeholder for empty layer maps. Colour is now semantic only: red for errors and destructive hover states.

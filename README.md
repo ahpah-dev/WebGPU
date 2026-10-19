@@ -12,6 +12,8 @@ This is an experimental runtime with a working browser UI and JavaScript SDK. It
 
 **Qwen3.8 27B verified:** the Q4_K_M model also generated `Paris` in the browser with a **2 GiB budget**, peaking at **1.985 GiB**. Its one-token SDK test took **181.9 seconds**, including the 23-token prompt; 164.8 seconds were spent awaiting weight reads. [Raw Qwen result](docs/qwen38-benchmark.json).
 
+**Qwen3.5 0.8B verified end to end:** the Q4_K_M file (532 MB) loaded and generated `Paris` in the browser with a **2 GiB budget**: **0.48 GiB** of file reads, **0.54 GiB** peak tracked GPU memory, 9 seconds to load and 7.4 seconds for the first token. Qwen3.5 and Qwen3.8 share the `qwen35` architecture and decoder; the newer mixture-of-experts builds of Qwen3.5 (35B-A3B, 122B-A10B) are not supported.
+
 ## Use it
 
 The built app is fully static. `dist/` can be served by any static file server or opened through the local byte server; there is no inference backend, so `npm start` only serves files. Inference, tokenization, paging, and the developer bridge all run inside the page.
@@ -69,9 +71,10 @@ Click **Open local models** and choose `~/.ollama/models`, or click **Use the Ol
 If you need weights first:
 
 ```sh
-ollama pull llama3.2:1b
+ollama pull qwen3.5:0.8b
 # Or:
-ollama pull qwen2.5:0.5b
+ollama pull qwen3:4b
+ollama pull gemma3:4b
 ollama pull qwen3.8:27b
 ```
 
@@ -85,7 +88,7 @@ On Windows and macOS it defaults to the current user's `.ollama/models`; on Linu
 
 The GitHub Pages app has an **Open local Ollama library** link to the local app. Automatic discovery uses the local app; direct GGUF selection works on either site.
 
-Qwen3.8 uses **non-thinking text chat** in this runtime, leaving the limited context for the answer. Its GGUF architecture is named `qwen35`; this is the correct architecture identifier for Qwen3.8, not a model substitution. The 64 text layers run; the optional MTP prediction layer and image projector are not evaluated.
+Qwen3.8 and Qwen3.5 use **non-thinking text chat** in this runtime, leaving the limited context for the answer. Both report the GGUF architecture `qwen35`; this is the correct architecture identifier for the family, not a model substitution. Qwen3.8's 64 text layers run; the optional MTP prediction layer and image projector are not evaluated.
 
 The previous `--ollama-model qwen3.8:27b` option remains available for a preselected byte source. To serve a standalone GGUF:
 
@@ -105,7 +108,7 @@ The Ollama Qwen3.8 27B GGUF is about **16.8 GB** (15.66 GiB); Gemma 3 27B is abo
 6. **Dense decoder.** One implementation covers Llama 3.x, Mistral, SmolLM, Qwen2, and Qwen3: RMS normalization, linear Q/K/V with optional Qwen2 bias, optional Qwen3 per-head Q/K normalization, grouped-query causal attention, SwiGLU or a plain SiLU MLP when the file has no gate tensor, and tied or untied output projection. The file decides the RoPE pairing (`llama` stores adjacent pairs, Qwen uses the half-split NeoX layout) and whether a sliding window applies. Llama 3 and YaRN rope scaling factors are accepted but not yet applied to the rotation; the runtime documents this rather than pretending otherwise.
 7. **Tokenizer selection.** `qwen35` uses the Qwen SentencePiece-derived tokenizer, `llama` files use a byte-level GPT-2 BPE with llama.cpp's pre-tokenization patterns, and Gemma files use the SentencePiece tokenizer. Chat framing comes from `tokenizer.chat_template` when present and is validated against the vocabulary's control tokens; an unknown template fails loudly instead of guessing.
 8. **Gemma 3 decoder.** Implements embedding scaling, RMS normalization, Q/K normalization, local/global RoPE, grouped-query causal/sliding attention, residual connections, GELU feed-forward layers, and the tied output projection. The 27B attention scale is handled separately.
-9. **Qwen3.8 decoder.** Implements causal depthwise convolution, L2-normalized Q/K, Gated DeltaNet with tiled GGUF value heads, gated RMS normalization, interleaved Q/gate projection, partial RoPE, gated grouped-query attention, SwiGLU, and the untied output projection. The tokenizer uses NFC normalization and ranked byte BPE with explicit non-thinking ChatML framing.
+9. **Qwen3.5 / Qwen3.8 decoder.** Implements causal depthwise convolution, L2-normalized Q/K, Gated DeltaNet with tiled GGUF value heads, gated RMS normalization, interleaved Q/gate projection, partial RoPE, gated grouped-query attention, SwiGLU, and the untied output projection. The tokenizer uses NFC normalization and ranked byte BPE with explicit non-thinking ChatML framing.
 10. **Dedicated worker.** Sampling and tokenization run in JavaScript; transformer matrix/attention operations run on WebGPU. Both remain inside the browser. Stop cancels at the next asynchronous boundary, and disposal terminates the worker.
 
 The GPU budget counts buffers allocated by this engine. It is **not a measurement of total process VRAM**: browser/driver allocations and temporary upload staging are additional. The runtime panel distinguishes file size, cumulative disk reads, resident cache hits, and tracked allocations.
@@ -212,7 +215,7 @@ On an RTX 5070 (adapter `blackwell`) **12/12 generated token ids matched** acros
 
 ## Current scope
 
-- Implements dense text inference for `llama` (Llama 3.x, Mistral, SmolLM), `qwen2` (Qwen2/2.5), `qwen3`, `gemma3`, and hybrid `qwen35` (Qwen3.8 27B) architectures. Other architecture identifiers, including mixture-of-experts models, are rejected with an explicit message. Other sizes sharing a supported architecture are not all validated on hardware.
+- Implements dense text inference for `llama` (Llama 3.x, Mistral, SmolLM), `qwen2` (Qwen2/2.5), `qwen3`, `gemma3`, and hybrid `qwen35` (Qwen3.5, Qwen3.8 27B) architectures. Other architecture identifiers are rejected with an explicit message. That includes Gemma 4 (`gemma4`) and every mixture-of-experts file such as Qwen3.5 35B-A3B, Qwen3.5 122B-A10B, Qwen3 30B-A3B, and Gemma 4 26B-A4B: this engine executes dense transformer layers only, so it does not run them. Other sizes sharing a supported architecture are not all validated on hardware; the 0.8B Qwen3.5 build is.
 - Chat framing is taken from `tokenizer.chat_template` and cross-checked against the vocabulary; a file with an unrecognized template fails instead of producing a malformed prompt. Llama 3 and YaRN `rope.scaling` factors are accepted and currently left unapplied to the rotation, so extremely long contexts on those models lose some positional accuracy.
 - Qwen chat runs in non-thinking mode. Images, video, tool execution, speculative MTP decoding, and extended reasoning controls are not exposed.
 - Does not implement arbitrary model architectures, image/audio encoders, split GGUF files, or every GGML quantization format.
