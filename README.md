@@ -30,27 +30,41 @@ npm run build
 npm start
 ```
 
-Open `http://127.0.0.1:8787`, then choose a GGUF file. The server binds to loopback and serves static assets; all inference still runs in the browser.
+Open `http://127.0.0.1:8787`, click **Open from Ollama**, and select an installed model by name. You can also choose a GGUF file. The server binds to loopback and serves static assets and model bytes; all inference still runs in the browser.
 
 For development, `npm run dev` runs Vite. Use the file picker in development; the optional model byte route is provided by `npm start`.
 
 ### Use weights already downloaded by Ollama
 
+The local app automatically discovers your Ollama library. No per-model startup argument, renaming, copying, or conversion is needed:
+
+```sh
+npm start
+```
+
+Click **Open from Ollama**, search for a model such as `qwen3.8:27b`, then select it. The picker displays its size and quantization. Models with unsupported architectures or quantization are shown with an explanation. **Refresh** discovers models downloaded since the picker was opened. Ollama itself does not need to be running; WebGPU reads its saved manifests and weight files.
+
+If you need weights first:
+
 ```sh
 ollama pull qwen3.8:27b
-npm start -- --ollama-model qwen3.8:27b
+# Or:
+ollama pull gemma3:27b
 ```
 
-Click **Use qwen3.8:27b.gguf**. Qwen3.8 uses **non-thinking text chat** in this runtime, leaving the limited context for the answer. Its GGUF architecture is named `qwen35`; this is the correct architecture identifier for Qwen3.8, not a model substitution. The 64 text layers run; the optional MTP prediction layer and image projector are not evaluated.
-
-Gemma 3 also works:
+The app respects `OLLAMA_MODELS`. For a custom directory, you can also use:
 
 ```sh
-ollama pull gemma3:27b
-npm start -- --ollama-model gemma3:27b
+npm start -- --ollama-dir /absolute/path/to/ollama/models
 ```
 
-Click **Use gemma3:27b.gguf**. The server locates Ollama's local manifest and exposes only that model's bytes with HTTP Range requests. Ollama does not need to be running. Alternatively:
+On Windows and macOS it defaults to the current user's `.ollama/models`; on Linux it also recognizes the standard service location. The catalog includes models in custom namespaces and registries. It exposes opaque model URLs, and model reads still require bounded HTTP Range requests. The local API is `GET /api/ollama/models`; each returned entry includes a `url`, `size`, compatibility status, and display metadata for use with `model.load({url, size, name})`.
+
+The GitHub Pages app has an **Open local Ollama library** link to the local app. Automatic discovery uses the local app; direct GGUF selection works on either site.
+
+Qwen3.8 uses **non-thinking text chat** in this runtime, leaving the limited context for the answer. Its GGUF architecture is named `qwen35`; this is the correct architecture identifier for Qwen3.8, not a model substitution. The 64 text layers run; the optional MTP prediction layer and image projector are not evaluated.
+
+The previous `--ollama-model qwen3.8:27b` option remains available for a preselected byte source. To serve a standalone GGUF:
 
 ```sh
 npm start -- --model /absolute/path/to/gemma-3-27b-it-Q4_K_M.gguf
@@ -115,6 +129,8 @@ npm start -- --ollama-model gemma3:27b
 Open `http://127.0.0.1:8787/verify.html` and select **Run kernel checks**. These checks execute real WebGPU kernels and compare their results with CPU references for all seven tensor types, batched/offset matrix operations, causal and sliding attention, RMS norm, and scaled RoPE. Qwen checks cover interleaved query/gates, causal convolution history, decay, recurrent state, batch versus sequential DeltaNet, gated normalization, SwiGLU, and partial RoPE. The standalone SDK smoke test loads whichever local model the byte server exposes and generates text; it is not a mocked inference test.
 
 CPU tests cover independently packed quantization fixtures, non-finite sampling rejection, file bounds, HTTP range enforcement, invalid GGUF headers, real Qwen3.8 tensor shapes, MTP exclusion, and 17 reference tokenizer cases from Hugging Face's tokenizer. GitHub Actions runs these tests and the production build before publishing the static application.
+
+Ollama integration tests exercise namespaced discovery, unsupported and incomplete models, malformed manifests, tag changes, selected-model HTTP byte ranges, opaque IDs, and origin restrictions. The browser picker has been checked with an actual installed `qwen3.8:27b`, including search, refresh, and loading into the runtime.
 
 ## Current scope
 

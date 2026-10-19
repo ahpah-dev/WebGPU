@@ -69,12 +69,20 @@ The budget counts engine-created GPU buffers, not total process VRAM. Browser/dr
 
 ## Automated checks
 
-- **18 Node tests passed:** independently packed quantization fixtures; half floats; invalid logits; Unicode fallback and SentencePiece merging; control token isolation; File API bounds; HTTP 206 enforcement; truncated ranges; invalid GGUF files; real Qwen3.8 tensor shapes and MTP exclusion; 17 independent Hugging Face tokenizer examples including NFC, multilingual text, combining marks, emoji, and whitespace.
+- **21 Node tests passed:** independently packed quantization fixtures; half floats; invalid logits; Unicode fallback and SentencePiece merging; control token isolation; File API bounds; HTTP 206 enforcement; truncated ranges; invalid GGUF files; real Qwen3.8 tensor shapes and MTP exclusion; 17 independent Hugging Face tokenizer examples including NFC, multilingual text, combining marks, emoji, and whitespace; Ollama catalog and selected-model byte-serving integration tests.
 - **12 real WebGPU checks passed:** all seven supported matrix tensor formats; batched matrix input/output offsets; causal grouped-query attention; sliding windows; RMS normalization; QK normalization and scaled RoPE; ordered reuse of a weight buffer between dispatches.
 - **Qwen GPU checks passed:** interleaved query/gate split, sigmoid output gating, causal depthwise convolution with carried history, L2 Q/K normalization, stable decay and beta, tiled value heads, batched versus sequential Gated DeltaNet with nonzero initial state, state clearing, gated RMS norm, SwiGLU, and partial RoPE (64 of 256 dimensions) at nonzero positions.
 - **Type check, production bundle, standalone SDK emission passed.**
 - **Byte-server checks passed:** valid 206 range; rejection of a whole-model GET; invalid-range 416; cross-origin 403.
 - The standalone SDK was loaded as native browser ES modules and generated the result above.
+
+## Opening installed Ollama models
+
+The local app discovered the installed `qwen3.8:27b` from its Ollama manifest and opened its existing 16,810,714,464-byte GGUF by name. Browser checks covered opening the picker, search, no results, Refresh, and loading the selected model until the runtime reported ready. No file dialog, copy, conversion, or per-model server argument was used. Model reads use the catalog's bounded range route; inference remains in the browser.
+
+Automated integration checks use isolated model-store fixtures for multiple models and namespaces, unsupported architectures, missing weights, malformed manifests, changed tag identities, correct 206 byte ranges, invalid ranges, unknown model IDs, and cross-origin rejection.
+
+![Open installed models directly from Ollama](ollama-library.jpg)
 
 ## Remaining limits
 

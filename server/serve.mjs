@@ -5,16 +5,19 @@ import { createReadStream } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 import { dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { homedir } from 'node:os';
+import { OllamaCatalog, defaultOllamaDirectory } from './ollama.mjs';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../dist');
 const args = process.argv.slice(2);
 const option = name => { const i = args.indexOf(name); return i < 0 ? undefined : args[i + 1]; };
+const ollamaDirectory = option('--ollama-dir') || await defaultOllamaDirectory();
+const catalog = new OllamaCatalog(ollamaDirectory);
+await catalog.refresh();
 let modelPath = option('--model'), modelName;
 const ollamaName = option('--ollama-model');
 if (ollamaName) {
   if (!/^[a-zA-Z0-9_.-]+:[a-zA-Z0-9_.-]+$/.test(ollamaName)) throw new Error('Use a library model:tag, for example gemma3:27b.');
   const [name, tag] = ollamaName.split(':');
-  const models = process.env.OLLAMA_MODELS || join(homedir(), '.ollama', 'models');
+  const models = ollamaDirectory;
   const manifest = JSON.parse(await readFile(join(models, 'manifests', 'registry.ollama.ai', 'library', name, tag), 'utf8'));
   const layer = manifest.layers.find(l => l.mediaType === 'application/vnd.ollama.image.model');
   if (!layer || !/^sha256:[a-f0-9]{64}$/.test(layer.digest)) throw new Error('No local GGUF weights found.');
@@ -34,12 +37,17 @@ const server = createServer(async (req, res) => {
     if (req.headers.origin && ![`http://127.0.0.1:${port}`, `http://localhost:${port}`].includes(req.headers.origin)) { res.writeHead(403); return res.end('Cross-origin access denied'); }
     const url = new URL(req.url, `http://127.0.0.1:${port}`);
     res.setHeader('X-Content-Type-Options', 'nosniff'); res.setHeader('Referrer-Policy', 'no-referrer');
+    if (url.pathname === '/api/ollama/models') {
+      res.setHeader('Content-Type', 'application/json'); res.setHeader('Cache-Control', 'no-store');
+      return res.end(JSON.stringify({ models: await catalog.refresh() }));
+    }
     if (url.pathname === '/model-info') {
       res.setHeader('Content-Type', 'application/json'); res.setHeader('Cache-Control', 'no-store');
-      return res.end(JSON.stringify(modelPath ? { url: '/model.gguf', name: modelName || 'Local GGUF', size: (await stat(modelPath)).size } : null));
+      return res.end(JSON.stringify(modelPath ? { url: '/model.gguf', name: modelName || 'Local GGUF', size: (await stat(modelPath)).size, kind: ollamaName ? 'ollama' : 'file' } : null));
     }
-    const isModel = url.pathname === '/model.gguf';
-    let file = isModel ? modelPath : resolve(root, '.' + decodeURIComponent(url.pathname === '/' ? '/index.html' : url.pathname));
+    const match = /^\/ollama\/models\/([a-f0-9]{64})\/weights\.gguf$/.exec(url.pathname);
+    const isModel = url.pathname === '/model.gguf' || Boolean(match);
+    let file = match ? catalog.resolve(match[1])?.path : isModel ? modelPath : resolve(root, '.' + decodeURIComponent(url.pathname === '/' ? '/index.html' : url.pathname));
     if (!file || (!isModel && !file.startsWith(root + sep))) { res.writeHead(404); return res.end(); }
     const info = await stat(file);
     if (!info.isFile()) { res.writeHead(404); return res.end(); }
@@ -64,5 +72,5 @@ const server = createServer(async (req, res) => {
 });
 server.listen(port, '127.0.0.1', () => {
   console.log(`WebGPU: http://127.0.0.1:${port}`);
-  console.log(modelPath ? 'Serving local model bytes. All inference executes inside the browser.' : 'Select a GGUF file in the browser.');
+  console.log('Ollama library available. All inference executes inside the browser.');
 });
