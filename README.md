@@ -16,6 +16,21 @@ Open [WebGPU](https://ahpah-dev.github.io/WebGPU/) in a browser with WebGPU hard
 
 Start with a **2 GiB budget** and **512-token context**. The GPU must have additional headroom for the browser, driver, display, and temporary upload staging. The app does not automatically know how much free VRAM your browser can use.
 
+### Faster mode
+
+In **Run configuration → Performance**, select **Faster · 6 GiB preset**, then **Apply Faster & reload model**. If no model is loaded, select the preset before opening a model. Changing the preset updates the budget control; you can lower that budget for your GPU before applying it.
+
+| UI preset | GPU buffer budget | Maximum weight page | Prompt batch |
+| --- | --- | --- | --- |
+| Memory saver | 2 GiB | 16 MiB | 32 tokens |
+| Faster | 6 GiB | 64 MiB, capped by adapter limits | 128 tokens |
+
+Faster mode reserves more GPU memory for resident weights, reducing repeated disk reads after the cache warms. Larger file ranges reduce request overhead, and longer prompt batches reuse weights across more tokens before another model pass is needed. The model weights, context length, and decoder stay the same. The first prompt still needs to read the model. Speed varies with GPU, storage, prompt length, and available memory; a 6 GiB engine budget also needs browser/driver headroom.
+
+The GPU budget remains enforced. Upload scheduling fences after eight pages **or 128 MiB**, so larger pages do not multiply queued upload staging. The runtime panel shows the actual page size, prompt batch, and resident cache hits. Selecting **Memory saver** restores the 2 GiB preset.
+
+In a short Qwen3.8-27B comparison on an RTX 5070, Memory saver took **220.6s** to the first token and **149.6s** for the next token; Faster took **136.7s** and **84.5s** respectively. Faster reduced the second pass's file reads by **30%** and peaked at **5.99 GiB** of tracked GPU buffers. Both modes generated identical tokens. This was a sequential two-token comparison with uncontrolled OS cache and background activity, not a general speed guarantee. See [the measurements](docs/VALIDATION.md#faster-preset-comparison) and [raw results](docs/speed-benchmark.json).
+
 Paging makes the memory requirement smaller; it does **not** make 27 billion parameters cheap to compute. Large models can be very slow, especially on the first prompt. More GPU budget reduces disk reads. There are no inference API charges or subscriptions; you supply the hardware, storage, electricity, and model weights.
 
 ## Run from source
@@ -76,9 +91,9 @@ The Ollama Qwen3.8 27B GGUF is about **16.8 GB** (15.66 GiB); Gemma 3 27B is abo
 
 1. **Random-access GGUF reader.** Uses safe numeric file offsets beyond 4 GiB. Reads metadata separately and never allocates a model-sized ArrayBuffer. Malformed or unsupported models fail explicitly.
 2. **Quantized kernels.** F32, F16, Q4_0, Q8_0, Q4_K, Q5_K, and Q6_K matrix multiplication decodes blocks on the GPU. The model's mixed tensor types remain quantized in storage and VRAM.
-3. **Bounded weight pager.** A reusable 16 MiB slot streams uncached weight pages. A fixed resident prefix uses the remaining budget; it avoids the repeated full-cache eviction of naive LRU on sequential transformer scans.
-4. **Ordered uploads.** GPU writes and dispatches are ordered. Fences after at most eight pages bound queued staging and allow uploads to overlap prior computation. Each transformer layer completes before progress advances.
-5. **Batched prompt processing.** Up to 32 prompt tokens reuse each weight page. Gemma uses a GPU KV cache and conversation prefix reuse. Qwen retains KV state for full-attention layers and fixed-size recurrent/convolution state for its other layers. It rebuilds the prompt state for each new request so edited prompts, retries, and cancellation cannot reuse stale recurrent state.
+3. **Bounded weight pager.** A reusable 16 MiB slot (up to 64 MiB in Faster mode) streams uncached weight pages. A fixed resident prefix uses the remaining budget; it avoids the repeated full-cache eviction of naive LRU on sequential transformer scans. Pages respect storage/buffer limits and the GPU's maximum dispatch row count.
+4. **Ordered uploads.** GPU writes and dispatches are ordered. Fences after at most eight pages or 128 MiB bound queued staging and allow uploads to overlap prior computation. Each transformer layer completes before progress advances.
+5. **Batched prompt processing.** Up to 128 prompt tokens reuse each weight page in Faster mode. Gemma uses a GPU KV cache and conversation prefix reuse. Qwen retains KV state for full-attention layers and fixed-size recurrent/convolution state for its other layers. It rebuilds the prompt state for each new request so edited prompts, retries, and cancellation cannot reuse stale recurrent state.
 6. **Gemma 3 decoder.** Implements embedding scaling, RMS normalization, Q/K normalization, local/global RoPE, grouped-query causal/sliding attention, residual connections, GELU feed-forward layers, and the tied output projection. The 27B attention scale is handled separately.
 7. **Qwen3.8 decoder.** Implements causal depthwise convolution, L2-normalized Q/K, Gated DeltaNet with tiled GGUF value heads, gated RMS normalization, interleaved Q/gate projection, partial RoPE, gated grouped-query attention, SwiGLU, and the untied output projection. The tokenizer uses NFC normalization and ranked byte BPE with explicit non-thinking ChatML framing.
 8. **Dedicated worker.** Sampling and tokenization run in JavaScript; transformer matrix/attention operations run on WebGPU. Both remain inside the browser. Stop cancels at the next asynchronous boundary, and disposal terminates the worker.
@@ -97,9 +112,9 @@ model.onProgress = ({ detail, stats }) => console.log(detail, stats);
 
 // file is a File from an <input type="file"> element.
 const info = await model.load(file, {
-  gpuBudgetMiB: 2048,
+  performance: 'fast', // Defaults: 6 GiB GPU budget, 128-token prompt batches.
+  gpuBudgetMiB: 6144,   // Optional explicit override to suit your GPU.
   contextLength: 512,
-  batchSize: 32,
 });
 
 for await (const chunk of model.generate(
@@ -118,6 +133,8 @@ model.dispose();  // Terminate the worker and release resources.
 
 This API is a browser JavaScript API, not a network REST server. Only one load or generation can run at a time. Supported context lengths are 256, 512, 1024, and 2048 tokens. When a prompt does not fit, the caller receives an error; history is not silently discarded. When generation reaches the remaining context limit, it ends.
 
+`performance` accepts `'low-memory'` (the default) or `'fast'`. Explicit `gpuBudgetMiB` and `batchSize` override the preset defaults. The low-memory SDK default remains 16 prompt tokens per batch for compatibility; the UI uses 32. Supported batches are 1, 8, 16, 32, 64, and 128. `ModelInfo` reports `performance`, `batchSize`, and the actual `stats.pageBytes`.
+
 ## Verification
 
 ```sh
@@ -131,6 +148,8 @@ Open `http://127.0.0.1:8787/verify.html` and select **Run kernel checks**. These
 CPU tests cover independently packed quantization fixtures, non-finite sampling rejection, file bounds, HTTP range enforcement, invalid GGUF headers, real Qwen3.8 tensor shapes, MTP exclusion, and 17 reference tokenizer cases from Hugging Face's tokenizer. GitHub Actions runs these tests and the production build before publishing the static application.
 
 Ollama integration tests exercise namespaced discovery, unsupported and incomplete models, malformed manifests, tag changes, selected-model HTTP byte ranges, opaque IDs, and origin restrictions. The browser picker has been checked with an actual installed `qwen3.8:27b`, including search, refresh, and loading into the runtime.
+
+Pager tests check larger pages, fixed cache reuse, bounded GPU allocations, adapter/dispatch limits, and invalid performance settings. GPU matrix and recurrent checks run 128-token batches against independent CPU references. The verification page also offers **Compare speed presets (2 tokens each)**: it runs the same local model and greedy prompt sequentially in both presets and reports token times, read bytes, cache hits, and tracked memory. This is a short benchmark rather than a universal speed guarantee.
 
 ## Current scope
 

@@ -69,9 +69,10 @@ The budget counts engine-created GPU buffers, not total process VRAM. Browser/dr
 
 ## Automated checks
 
-- **21 Node tests passed:** independently packed quantization fixtures; half floats; invalid logits; Unicode fallback and SentencePiece merging; control token isolation; File API bounds; HTTP 206 enforcement; truncated ranges; invalid GGUF files; real Qwen3.8 tensor shapes and MTP exclusion; 17 independent Hugging Face tokenizer examples including NFC, multilingual text, combining marks, emoji, and whitespace; Ollama catalog and selected-model byte-serving integration tests.
+- **24 Node tests passed:** independently packed quantization fixtures; half floats; invalid logits; Unicode fallback and SentencePiece merging; control token isolation; File API bounds; HTTP 206 enforcement; truncated ranges; invalid GGUF files; real Qwen3.8 tensor shapes and MTP exclusion; 17 independent Hugging Face tokenizer examples including NFC, multilingual text, combining marks, emoji, and whitespace; Ollama catalog and selected-model byte-serving integration tests; larger-page caching, adapter/dispatch limits, allocation bounds, and performance-option validation.
 - **12 real WebGPU checks passed:** all seven supported matrix tensor formats; batched matrix input/output offsets; causal grouped-query attention; sliding windows; RMS normalization; QK normalization and scaled RoPE; ordered reuse of a weight buffer between dispatches.
 - **Qwen GPU checks passed:** interleaved query/gate split, sigmoid output gating, causal depthwise convolution with carried history, L2 Q/K normalization, stable decay and beta, tiled value heads, batched versus sequential Gated DeltaNet with nonzero initial state, state clearing, gated RMS norm, SwiGLU, and partial RoPE (64 of 256 dimensions) at nonzero positions.
+- Matrix and recurrent fixtures were also verified with **128-token batches** for Faster mode. The recurrent test compares batched output and final state with token-at-a-time evaluation and an independent CPU equation.
 - **Type check, production bundle, standalone SDK emission passed.**
 - **Byte-server checks passed:** valid 206 range; rejection of a whole-model GET; invalid-range 416; cross-origin 403.
 - The standalone SDK was loaded as native browser ES modules and generated the result above.
@@ -83,6 +84,32 @@ The local app discovered the installed `qwen3.8:27b` from its Ollama manifest an
 Automated integration checks use isolated model-store fixtures for multiple models and namespaces, unsupported architectures, missing weights, malformed manifests, changed tag identities, correct 206 byte ranges, invalid ranges, unknown model IDs, and cross-origin rejection.
 
 ![Open installed models directly from Ollama](ollama-library.jpg)
+
+## Faster preset comparison
+
+The browser SDK ran `Write exactly these two words: Paris France` greedily for two output tokens, first with Memory saver and then with Faster, using the same Qwen3.8-27B Q4_K_M file. Both modes used a 512-token context and the same 20-token prompt. Both generated the exact token IDs **57590, 9338**, decoding to `Paris France`.
+
+| Measurement | Memory saver | Faster |
+| --- | ---: | ---: |
+| Engine GPU budget | 2 GiB | 6 GiB |
+| Maximum weight page | 16 MiB | 64 MiB |
+| Configured prompt batch | 32 | 128 |
+| Time to first token, including prompt | 220.5594s | 136.7362s |
+| Additional time for second token | 149.6079s | 84.5120s |
+| Total generation time | 370.1744s | 221.2540s |
+| First-pass weight reads | 15,810,662,400 bytes | 15,810,662,400 bytes |
+| Second-pass weight reads | 13,950,820,224 bytes | 9,761,786,880 bytes |
+| First-pass page uploads | 1,223 | 544 |
+| Resident weight cache | 1,859,842,176 bytes | 6,048,875,520 bytes |
+| Peak tracked GPU buffers | 2,131,695,744 bytes | 6,426,577,920 bytes |
+
+Observed first-token speedup was **1.61×**, and second-token speedup **1.77×**. The larger resident cache reduced second-pass file reads by **30.03%**. Larger pages reduced first-pass uploads even though the same number of bytes was read. The prompt fit in one batch in both modes, so this run does not measure the extra benefit of 128-token batching for longer prompts; that batch size was checked separately against GPU/CPU reference fixtures.
+
+This is a short sequential comparison on Windows with an RTX 5070 (12 GB VRAM) and 16 GB RAM. OS file cache state and concurrent system/GPU activity were not controlled. Timing differences are observations, not a guaranteed speedup on other workloads or hardware. The allocation counter excludes browser/driver resources and upload staging. All model computation stayed in the browser; a local server supplied file bytes only. [Raw events and summaries](speed-benchmark.json).
+
+The UI was also checked by loading a model in Memory saver, selecting Faster, applying the reload, and confirming the runtime displayed **64 MiB pages**, **128-token batches**, and the **6 GiB budget**. Returning to Memory saver restored the 2 GiB preset.
+
+![Faster selected for a local Qwen model](faster-mode.jpg)
 
 ## Remaining limits
 

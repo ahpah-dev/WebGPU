@@ -2,24 +2,26 @@ import { Compute, MiB } from './gpu.ts';
 import type { ByteSource } from './source.ts';
 import type { Tensor } from './gguf.ts';
 
-export interface PagingStats { readBytes: number; readMs: number; uploads: number; cacheHits: number; cacheBytes: number; gpuBytes: number; peakGpuBytes: number }
+export interface PagingStats { readBytes: number; readMs: number; uploads: number; cacheHits: number; cacheBytes: number; gpuBytes: number; peakGpuBytes: number; pageBytes: number }
 /** Stable resident prefix + one reusable streaming slot avoids LRU scan thrashing. */
 export class WeightPager {
   private cache = new Map<string, GPUBuffer>();
   private scratch: GPUBuffer;
   private cacheBudget: number;
   readonly pageBytes: number;
-  stats: PagingStats = { readBytes: 0, readMs: 0, uploads: 0, cacheHits: 0, cacheBytes: 0, gpuBytes: 0, peakGpuBytes: 0 };
+  stats: PagingStats = { readBytes: 0, readMs: 0, uploads: 0, cacheHits: 0, cacheBytes: 0, gpuBytes: 0, peakGpuBytes: 0, pageBytes: 0 };
   private gpu: Compute;
   private source: ByteSource;
-  constructor(gpu: Compute, source: ByteSource) {
+  constructor(gpu: Compute, source: ByteSource, pageSizeMiB = 16) {
     this.gpu = gpu; this.source = source;
-    this.pageBytes = Math.min(16 * MiB, gpu.device.limits.maxStorageBufferBindingSize);
+    if (![16, 64].includes(pageSizeMiB)) throw new Error('Weight pages must be 16 or 64 MiB.');
+    this.pageBytes = Math.min(pageSizeMiB * MiB, gpu.device.limits.maxStorageBufferBindingSize, gpu.device.limits.maxBufferSize);
+    this.stats.pageBytes = this.pageBytes;
     this.scratch = gpu.buffer(this.pageBytes, 'streaming weight page');
     // Leave headroom for readback and transient uniforms. Driver allocations are outside this counter.
     this.cacheBudget = Math.max(0, gpu.limit - gpu.allocated - 16 * MiB);
   }
-  rowsPerPage(t: Tensor) { return Math.max(1, Math.floor(this.pageBytes / t.rowBytes)); }
+  rowsPerPage(t: Tensor) { return Math.max(1, Math.min(this.gpu.device.limits.maxComputeWorkgroupsPerDimension, Math.floor(this.pageBytes / t.rowBytes))); }
   async page(t: Tensor, row: number, count: number, signal?: AbortSignal): Promise<GPUBuffer> {
     signal?.throwIfAborted();
     const key = `${t.name}:${row}:${count}`, hit = this.cache.get(key);

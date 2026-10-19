@@ -13,7 +13,7 @@ document.getElementById('math')!.onclick = async () => {
   try {
     await gpu.init(); log(`Adapter: ${gpu.adapterName}`);
     for (const type of [0, 1, 2, 8, 12, 13, 14]) {
-      const rows = 5, cols = 256, batches = 3, layout = QUANTS[type];
+      const rows = 5, cols = 256, batches = 128, layout = QUANTS[type];
       const packed = new Uint8Array(Math.ceil(rows * cols / layout.block * layout.bytes / 4) * 4);
       for (let i = 0; i < packed.length; i++) packed[i] = (i * 17 + 93) % 256;
       if (type === 0) { const f = new Float32Array(packed.buffer); for (let i = 0; i < f.length; i++) f[i] = Math.sin(i) * .5; }
@@ -89,3 +89,30 @@ document.getElementById('model')!.onclick = async () => {
   finally { progress.remove(); }
 };
 document.getElementById('cancel')!.onclick = () => { model?.dispose(); log('Runtime disposed.'); };
+
+document.getElementById('speed')!.onclick = async () => {
+  result.textContent = 'Comparing Memory saver and Faster using the same local model…\n';
+  const progress = document.createElement('p'); result.before(progress);
+  for (const id of ['math', 'model', 'speed']) (document.getElementById(id) as HTMLButtonElement).disabled = true;
+  try {
+    if (!['127.0.0.1', 'localhost'].includes(location.hostname)) throw new Error('Run this comparison in the local app to access installed model bytes.');
+    const response = await fetch('/api/ollama/models'), catalog = response.ok ? await response.json() : undefined;
+    let descriptor = catalog?.models?.find((m: { supported: boolean; name: string }) => m.supported && m.name === 'qwen3.8:27b') ?? catalog?.models?.find((m: { supported: boolean }) => m.supported);
+    if (!descriptor) { const fallback = await fetch('/model-info'); descriptor = fallback.ok ? await fallback.json() : undefined; }
+    if (!descriptor) throw new Error('No supported local model found.');
+    descriptor.url = new URL(descriptor.url, location.href).href;
+    for (const mode of ['low-memory', 'fast'] as const) {
+      model?.dispose(); model = new WebGPU();
+      model.onProgress = p => { progress.textContent = `${mode}: ${p.detail}`; };
+      const info = await model.load(descriptor, { performance: mode, gpuBudgetMiB: mode === 'fast' ? 6144 : 2048, contextLength: 512, batchSize: mode === 'fast' ? 128 : 32 });
+      const started = performance.now(), events = [];
+      for await (const token of model.generate([{ role: 'user', content: 'Write exactly these two words: Paris France' }], { temperature: 0, maxTokens: 2 })) {
+        events.push(token); log(JSON.stringify({ mode, token }));
+      }
+      log(JSON.stringify({ mode, info, events, generationSeconds: (performance.now() - started) / 1000 }));
+      model.dispose();
+    }
+    log('SPEED COMPARISON COMPLETE');
+  } catch (e) { log(`ERROR: ${e instanceof Error ? e.message : e}`); }
+  finally { model?.dispose(); progress.remove(); for (const id of ['math', 'model', 'speed']) (document.getElementById(id) as HTMLButtonElement).disabled = false; }
+};

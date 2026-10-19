@@ -8,11 +8,12 @@ import { QwenTokenizer } from './qwen-tokenizer.ts';
 import { qwenKernels } from './qwen-shaders.ts';
 import { matmulShader, normShader, ropeShader, attentionShader, addShader, geluShader } from './shaders.ts';
 
-export interface LoadOptions { gpuBudgetMiB?: number; contextLength?: number; batchSize?: number }
+export type PerformanceMode = 'low-memory' | 'fast';
+export interface LoadOptions { gpuBudgetMiB?: number; contextLength?: number; batchSize?: number; performance?: PerformanceMode }
 export interface Message { role: 'user' | 'assistant'; content: string }
 export interface GenerationOptions { maxTokens?: number; temperature?: number; topK?: number; topP?: number }
 export interface Progress { phase: string; detail: string; fraction: number; layer?: number; stats?: PagingStats }
-export interface ModelInfo { config: ModelConfig; fileBytes: number; adapter: string; contextLength: number; gpuBudgetMiB: number; stats: PagingStats }
+export interface ModelInfo { config: ModelConfig; fileBytes: number; adapter: string; contextLength: number; gpuBudgetMiB: number; batchSize: number; performance: PerformanceMode; stats: PagingStats }
 export interface TokenEvent { token: number; text: string; delta: string; tokens: number; seconds: number; stats: PagingStats }
 
 export class PagedEngine {
@@ -31,16 +32,20 @@ export class PagedEngine {
   private context = 512;
   private batch = 16;
   private budget = 2048;
+  private performance: PerformanceMode = 'low-memory';
   private busy = false;
   private disposed = false;
   private tokensInCache: number[] = [];
   private pendingPages = 0;
+  private pendingBytes = 0;
   private progress: (p: Progress) => void;
   constructor(progress: (p: Progress) => void = () => {}) { this.progress = progress; }
   async load(input: SourceInput, options: LoadOptions = {}, signal?: AbortSignal): Promise<ModelInfo> {
-    this.context = options.contextLength ?? 512; this.batch = options.batchSize ?? 16; this.budget = options.gpuBudgetMiB ?? 2048;
+    this.performance = options.performance ?? 'low-memory';
+    if (!['low-memory', 'fast'].includes(this.performance)) throw new Error('Performance must be low-memory or fast.');
+    this.context = options.contextLength ?? 512; this.batch = options.batchSize ?? (this.performance === 'fast' ? 128 : 16); this.budget = options.gpuBudgetMiB ?? (this.performance === 'fast' ? 6144 : 2048);
     if (![256, 512, 1024, 2048].includes(this.context)) throw new Error('Context must be 256, 512, 1024 or 2048 tokens.');
-    if (![1, 8, 16, 32].includes(this.batch)) throw new Error('Batch size must be 1, 8, 16 or 32.');
+    if (![1, 8, 16, 32, 64, 128].includes(this.batch)) throw new Error('Batch size must be 1, 8, 16, 32, 64 or 128.');
     if (!Number.isInteger(this.budget) || this.budget < 512 || this.budget > 16384) throw new Error('GPU budget must be 512–16384 MiB.');
     this.source = makeSource(input);
     this.progress({ phase: 'loading', detail: 'Reading GGUF metadata and tokenizer', fraction: 0.05 });
@@ -74,12 +79,12 @@ export class PagedEngine {
         const b = this.gpu.buffer(values.byteLength, t.name); this.gpu.write(b, values); this.norms.set(t.name, b);
         if (i % 20 === 0) this.progress({ phase: 'loading', detail: 'Loading normalization vectors', fraction: 0.5 + 0.45 * i / norms.length });
       }
-      this.pager = new WeightPager(this.gpu, this.source); await this.gpu.done();
+      this.pager = new WeightPager(this.gpu, this.source, this.performance === 'fast' ? 64 : 16); await this.gpu.done();
       this.progress({ phase: 'ready', detail: 'Ready. Model weights will page in as you generate.', fraction: 1, stats: this.pager.snapshot() });
       return this.info();
     } catch (e) { this.dispose(); throw e; }
   }
-  info(): ModelInfo { return { config: this.config, fileBytes: this.source.size, adapter: this.gpu.adapterName, contextLength: this.context, gpuBudgetMiB: this.budget, stats: this.pager.snapshot() }; }
+  info(): ModelInfo { return { config: this.config, fileBytes: this.source.size, adapter: this.gpu.adapterName, contextLength: this.context, gpuBudgetMiB: this.budget, batchSize: this.batch, performance: this.performance, stats: this.pager.snapshot() }; }
   private tensor(name: string): Tensor { const t = this.gguf.tensors.get(name); if (!t) throw new Error(`Missing ${name}.`); return t; }
   private norm(src: GPUBuffer, dst: GPUBuffer, name: string, batch: number) {
     this.gpu.run(this.kernels.norm, [src, this.norms.get(name)!, dst], [this.config.hidden, { f: this.config.epsilon }], batch);
@@ -92,8 +97,9 @@ export class PagedEngine {
       this.gpu.run(pipeline, [weights, src, dst], [columns, n, rows, row, inputOffset, 0, 0, 0], n, batch);
       // writeBuffer and submit share an ordered GPU queue. A subsequent upload cannot
       // overwrite the slot before the previous dispatch consumes it. Fence every eight
-      // pages to bound staging/queued work instead of stalling for every matrix page.
-      if (++this.pendingPages >= 8) { await this.gpu.done(); this.pendingPages = 0; }
+      // pages or 128 MiB to bound staging, including the larger Fast-mode pages.
+      this.pendingPages++; this.pendingBytes += n * t.rowBytes;
+      if (this.pendingPages >= 8 || this.pendingBytes >= 128 * MiB) { await this.gpu.done(); this.pendingPages = 0; this.pendingBytes = 0; }
     }
   }
   private async forward(ids: number[], start: number, logits: boolean, signal?: AbortSignal): Promise<Float32Array | undefined> {
@@ -110,7 +116,7 @@ export class PagedEngine {
       this.norm(w.hidden, w.normed, prefix + 'attn_norm.weight', n);
       if (c.architecture === 'qwen35') {
         await this.qwenLayer(l, n, start, signal);
-        await this.gpu.done(); this.pendingPages = 0; continue;
+        await this.gpu.done(); this.pendingPages = 0; this.pendingBytes = 0; continue;
       }
       await this.linear(prefix + 'attn_q.weight', w.normed, w.q, n, signal);
       await this.linear(prefix + 'attn_k.weight', w.normed, w.k, n, signal);
@@ -129,7 +135,7 @@ export class PagedEngine {
       await this.linear(prefix + 'ffn_down.weight', w.product, w.down, n, signal);
       this.norm(w.down, w.normed, prefix + 'post_ffw_norm.weight', n);
       this.gpu.run(this.kernels.add, [w.normed, w.hidden], [n * c.hidden], Math.ceil(n * c.hidden / 256));
-      await this.gpu.done(); this.pendingPages = 0;
+      await this.gpu.done(); this.pendingPages = 0; this.pendingBytes = 0;
     }
     if (!logits) { await this.gpu.done(); return; }
     this.norm(w.hidden, w.normed, 'output_norm.weight', n);

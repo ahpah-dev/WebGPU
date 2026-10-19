@@ -1,6 +1,6 @@
-import type { GenerationOptions, LoadOptions, Message, ModelInfo, Progress, TokenEvent } from './core/engine.ts';
+import type { GenerationOptions, LoadOptions, Message, ModelInfo, Progress, TokenEvent, PerformanceMode } from './core/engine.ts';
 import type { SourceInput } from './core/source.ts';
-export type { GenerationOptions, LoadOptions, Message, ModelInfo, Progress, TokenEvent, SourceInput };
+export type { GenerationOptions, LoadOptions, Message, ModelInfo, Progress, TokenEvent, SourceInput, PerformanceMode };
 
 /** Browser API. Worker owns all WebGPU resources; no inference server is used. */
 export class WebGPU {

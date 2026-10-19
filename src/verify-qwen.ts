@@ -15,7 +15,7 @@ export async function verifyQwen(gpu: Compute, log: (s: string) => void) {
   try {
     for (const [name, source] of Object.entries(qwenKernels)) kernels[name] = await gpu.pipeline(source, `Qwen test ${name}`);
     // Interleaved per-head Q/gate projection, including the next token's stride.
-    const hd = 128, kh = 2, vh = 6, batch = 3, channels = (2 * kh + vh) * hd, values = vh * hd;
+    const hd = 128, kh = 2, vh = 6, batch = 128, channels = (2 * kh + vh) * hd, values = vh * hd;
     const qg = series(2 * batch * values), qb = empty(batch * values), gate = empty(batch * values), attn = series(batch * values, .3), ab = data(attn);
     gpu.run(kernels.splitQuery, [data(qg), qb, gate], [attn.length, hd], Math.ceil(attn.length / 256));
     const query = Float32Array.from(attn, (_, i) => qg[Math.floor(i / hd) * 2 * hd + i % hd]);
@@ -46,7 +46,7 @@ export async function verifyQwen(gpu: Compute, log: (s: string) => void) {
     const alpha = series(batch * vh, 30), beta = series(batch * vh, 2), a = Float32Array.from(series(vh), x => -Math.exp(x)), dt = series(vh);
     const controls = Float32Array.from({ length: batch * vh * 2 }, (_, i) => { const j = Math.floor(i / 2), z = alpha[j] + dt[j % vh]; return i % 2 ? 1 / (1 + Math.exp(-beta[j])) : Math.exp(a[j % vh] * (Math.max(z, 0) + Math.log1p(Math.exp(-Math.abs(z))))); });
     const control = empty(controls.length);
-    gpu.run(kernels.decay, [data(alpha), data(beta), data(a), data(dt), control], [batch * vh, vh], 1);
+    gpu.run(kernels.decay, [data(alpha), data(beta), data(a), data(dt), control], [batch * vh, vh], Math.ceil(batch * vh / 256));
     await compare(control, controls, 'stable decay and beta');
 
     const initial = series(vh * hd * hd, .03), state = initial.slice(), expected = new Float32Array(batch * values);
