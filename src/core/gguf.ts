@@ -87,6 +87,7 @@ export interface ModelConfig {
   vocab: number; epsilon: number; theta: number; localTheta: number; window: number; period: number;
   attentionScale: number; ropeScale: number; name: string; parameters: number;
   rotaryDim: number;
+  maxContext: number;
   recurrent?: { keyHeads: number; valueHeads: number; headDim: number; convKernel: number; layers: boolean[] };
 }
 export function modelConfig(g: GGUF): ModelConfig {
@@ -110,7 +111,9 @@ export function modelConfig(g: GGUF): ModelConfig {
     ropeScale: 1 / num('rope.scaling.factor', 1),
     name: String(g.metadata.get('general.name') ?? architecture), parameters: g.parameters,
     rotaryDim: architecture === 'gemma3' ? headDim : num('rope.dimension_count'),
+    maxContext: num('context_length', 32768),
   };
+  if (!Number.isSafeInteger(cfg.maxContext)) throw new Error('Invalid model context length.');
   if ([layers, hidden, heads, headDim, cfg.kvHeads, cfg.intermediate, cfg.period, cfg.rotaryDim].some(n => !Number.isInteger(n) || n < 1) || heads % cfg.kvHeads || headDim % 2 || cfg.rotaryDim % 2 || cfg.rotaryDim > headDim || !cfg.vocab || layers > 128 || heads > 256 || headDim > 512 || hidden > 16384 || cfg.intermediate > 131072 || cfg.vocab > 1_000_000) throw new Error('Unsupported model dimensions.');
   if (architecture === 'qwen35') {
     const flags = g.metadata.get('qwen35.attention.recurrent_layers');

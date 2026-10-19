@@ -7,6 +7,7 @@ import { Tokenizer } from './tokenizer.ts';
 import { QwenTokenizer } from './qwen-tokenizer.ts';
 import { qwenKernels } from './qwen-shaders.ts';
 import { matmulShader, normShader, ropeShader, attentionShader, addShader, geluShader } from './shaders.ts';
+import { attentionMemory, cacheCopies, MAX_CONTEXT, MAX_MESSAGE_CHARS, outputLimit, validateContext } from './context.ts';
 
 export type PerformanceMode = 'low-memory' | 'fast';
 export interface LoadOptions { gpuBudgetMiB?: number; contextLength?: number; batchSize?: number; performance?: PerformanceMode }
@@ -14,7 +15,7 @@ export interface Message { role: 'user' | 'assistant'; content: string }
 export interface GenerationOptions { maxTokens?: number; temperature?: number; topK?: number; topP?: number }
 export interface Progress { phase: string; detail: string; fraction: number; layer?: number; stats?: PagingStats }
 export interface ModelInfo { config: ModelConfig; fileBytes: number; adapter: string; contextLength: number; gpuBudgetMiB: number; batchSize: number; performance: PerformanceMode; stats: PagingStats }
-export interface TokenEvent { token: number; text: string; delta: string; tokens: number; seconds: number; stats: PagingStats }
+export interface TokenEvent { token: number; text: string; delta: string; tokens: number; promptTokens: number; contextLength: number; seconds: number; stats: PagingStats }
 
 export class PagedEngine {
   private gpu!: Compute;
@@ -26,6 +27,7 @@ export class PagedEngine {
   private work: Record<string, GPUBuffer> = {};
   private norms = new Map<string, GPUBuffer>();
   private kv: ({ k: GPUBuffer; v: GPUBuffer } | undefined)[] = [];
+  private kvCapacities: number[] = [];
   private recurrent = new Map<number, { conv: GPUBuffer; state: GPUBuffer }>();
   private mm = new Map<number, GPUComputePipeline>();
   private kernels: Record<string, GPUComputePipeline> = {};
@@ -44,20 +46,22 @@ export class PagedEngine {
     this.performance = options.performance ?? 'low-memory';
     if (!['low-memory', 'fast'].includes(this.performance)) throw new Error('Performance must be low-memory or fast.');
     this.context = options.contextLength ?? 512; this.batch = options.batchSize ?? (this.performance === 'fast' ? 128 : 16); this.budget = options.gpuBudgetMiB ?? (this.performance === 'fast' ? 6144 : 2048);
-    if (![256, 512, 1024, 2048].includes(this.context)) throw new Error('Context must be 256, 512, 1024 or 2048 tokens.');
+    validateContext(this.context);
     if (![1, 8, 16, 32, 64, 128].includes(this.batch)) throw new Error('Batch size must be 1, 8, 16, 32, 64 or 128.');
     if (!Number.isInteger(this.budget) || this.budget < 512 || this.budget > 16384) throw new Error('GPU budget must be 512–16384 MiB.');
     this.source = makeSource(input);
     this.progress({ phase: 'loading', detail: 'Reading GGUF metadata and tokenizer', fraction: 0.05 });
     this.gguf = await readGGUF(this.source, signal); this.config = modelConfig(this.gguf);
+    validateContext(this.context, this.config.maxContext);
     this.tokenizer = this.config.architecture === 'qwen35' ? new QwenTokenizer(this.gguf.metadata) : new Tokenizer(this.gguf.metadata);
-    const c = this.config, r = c.recurrent, recurrentLayers = r?.layers.filter(Boolean).length ?? 0;
-    const kvBytes = (c.layers - recurrentLayers) * this.context * c.kvHeads * c.headDim * 8;
-    const stateBytes = r ? recurrentLayers * (r.valueHeads * r.headDim ** 2 + (2 * r.keyHeads + r.valueHeads) * r.headDim * (r.convKernel - 1)) * 4 : 0;
-    if (kvBytes + stateBytes + 96 * MiB > this.budget * MiB) throw new Error(`This context needs about ${Math.ceil((kvBytes + stateBytes) / MiB)} MiB for attention state. Reduce context length or increase the GPU budget.`);
+    const c = this.config, r = c.recurrent, memory = attentionMemory(c, this.context, this.batch);
+    this.kvCapacities = memory.capacities;
+    if (memory.totalBytes + 256 * MiB > this.budget * MiB) throw new Error(`A ${this.context.toLocaleString()}-token context needs ${Math.ceil(memory.totalBytes / MiB).toLocaleString()} MiB of attention state plus working memory. Choose at least ${Math.ceil((memory.totalBytes + 256 * MiB) / MiB).toLocaleString()} MiB of GPU budget, or reduce context.`);
     this.gpu = new Compute(this.budget);
     try {
       await this.gpu.init(); signal?.throwIfAborted();
+      const largestKV = Math.max(...this.kvCapacities) * c.kvHeads * c.headDim * 4;
+      if (largestKV > Math.min(this.gpu.device.limits.maxStorageBufferBindingSize, this.gpu.device.limits.maxBufferSize)) throw new Error('The selected context exceeds this browser’s per-buffer GPU limit. Choose a smaller context.');
       this.progress({ phase: 'loading', detail: 'Compiling quantized WebGPU kernels', fraction: 0.25 });
       const types = new Set([...this.gguf.tensors.values()].filter(t => t.dims.length === 2).map(t => t.type));
       for (const type of types) this.mm.set(type, await this.gpu.pipeline(matmulShader(type), `quantized matmul ${type}`));
@@ -69,7 +73,7 @@ export class PagedEngine {
       this.work.logits = this.gpu.buffer(c.vocab * 4, 'logits');
       for (let layer = 0; layer < c.layers; layer++) {
         if (r?.layers[layer]) this.recurrent.set(layer, { conv: this.gpu.buffer((2 * r.keyHeads + r.valueHeads) * r.headDim * (r.convKernel - 1) * 4, `convolution state ${layer}`), state: this.gpu.buffer(r.valueHeads * r.headDim ** 2 * 4, `recurrent state ${layer}`) });
-        else this.kv[layer] = { k: this.gpu.buffer(this.context * c.kvHeads * c.headDim * 4, `K ${layer}`), v: this.gpu.buffer(this.context * c.kvHeads * c.headDim * 4, `V ${layer}`) };
+        else this.kv[layer] = { k: this.gpu.buffer(this.kvCapacities[layer] * c.kvHeads * c.headDim * 4, `K ${layer}`), v: this.gpu.buffer(this.kvCapacities[layer] * c.kvHeads * c.headDim * 4, `V ${layer}`) };
       }
       const norms = [...this.gguf.tensors.values()].filter(t => (t.dims.length === 1 || t.name.endsWith('ssm_conv1d.weight')) && (!t.name.startsWith('blk.') || Number(t.name.split('.')[1]) < c.layers));
       for (let i = 0; i < norms.length; i++) {
@@ -88,6 +92,11 @@ export class PagedEngine {
   private tensor(name: string): Tensor { const t = this.gguf.tensors.get(name); if (!t) throw new Error(`Missing ${name}.`); return t; }
   private norm(src: GPUBuffer, dst: GPUBuffer, name: string, batch: number) {
     this.gpu.run(this.kernels.norm, [src, this.norms.get(name)!, dst], [this.config.hidden, { f: this.config.epsilon }], batch);
+  }
+  private cacheKV(layer: number, n: number, start: number) {
+    const stride = this.config.kvHeads * this.config.headDim * 4, kv = this.kv[layer]!;
+    for (const copy of cacheCopies(start, n, this.kvCapacities[layer])) for (const name of ['k', 'v'] as const)
+      this.gpu.copy(this.work[name], kv[name], copy.count * stride, copy.source * stride, copy.target * stride);
   }
   private async linear(name: string, src: GPUBuffer, dst: GPUBuffer, batch: number, signal?: AbortSignal, inputOffset = 0) {
     const t = this.tensor(name), [columns, rows] = t.dims, pageRows = this.pager.rowsPerPage(t), pipeline = this.mm.get(t.type)!;
@@ -122,9 +131,8 @@ export class PagedEngine {
       await this.linear(prefix + 'attn_k.weight', w.normed, w.k, n, signal);
       await this.linear(prefix + 'attn_v.weight', w.normed, w.v, n, signal);
       for (const [name, heads] of [['q', c.heads], ['k', c.kvHeads]] as const) this.gpu.run(this.kernels.rope, [w[name], this.norms.get(prefix + `attn_${name}_norm.weight`)!], [heads, c.headDim, start, { f: local ? c.localTheta : c.theta }, { f: local ? 1 : c.ropeScale }, { f: c.epsilon }, 0, 0], heads, n);
-      const kvStride = c.kvHeads * c.headDim * 4;
-      this.gpu.copy(w.k, this.kv[l]!.k, n * kvStride, 0, start * kvStride); this.gpu.copy(w.v, this.kv[l]!.v, n * kvStride, 0, start * kvStride);
-      this.gpu.run(this.kernels.attention, [w.q, this.kv[l]!.k, this.kv[l]!.v, w.attention], [c.heads, c.kvHeads, c.headDim, start, { f: c.attentionScale }, local ? c.window : this.context, 0, 0], c.heads, n);
+      this.cacheKV(l, n, start);
+      this.gpu.run(this.kernels.attention, [w.q, this.kv[l]!.k, this.kv[l]!.v, w.attention], [c.heads, c.kvHeads, c.headDim, start, { f: c.attentionScale }, local ? c.window : this.context, this.kvCapacities[l], 0], c.heads, n);
       await this.linear(prefix + 'attn_output.weight', w.attention, w.projection, n, signal);
       this.norm(w.projection, w.normed, prefix + 'post_attention_norm.weight', n);
       this.gpu.run(this.kernels.add, [w.normed, w.hidden], [n * c.hidden], Math.ceil(n * c.hidden / 256));
@@ -162,9 +170,8 @@ export class PagedEngine {
       await this.linear(prefix + 'attn_k.weight', w.normed, w.k, n, signal);
       await this.linear(prefix + 'attn_v.weight', w.normed, w.v, n, signal);
       for (const [name, heads] of [['q', c.heads], ['k', c.kvHeads]] as const) this.gpu.run(this.kernels.rope, [w[name], this.norms.get(prefix + `attn_${name}_norm.weight`)!], [heads, c.headDim, start, { f: c.theta }, { f: c.ropeScale }, { f: c.epsilon }, c.rotaryDim, 0], heads, n);
-      const kv = this.kv[layer]!, stride = c.kvHeads * c.headDim * 4;
-      this.gpu.copy(w.k, kv.k, n * stride, 0, start * stride); this.gpu.copy(w.v, kv.v, n * stride, 0, start * stride);
-      this.gpu.run(this.kernels.attention, [w.q, kv.k, kv.v, w.attention], [c.heads, c.kvHeads, c.headDim, start, { f: c.attentionScale }, this.context, 0, 0], c.heads, n);
+      const kv = this.kv[layer]!; this.cacheKV(layer, n, start);
+      this.gpu.run(this.kernels.attention, [w.q, kv.k, kv.v, w.attention], [c.heads, c.kvHeads, c.headDim, start, { f: c.attentionScale }, this.context, this.kvCapacities[layer], 0], c.heads, n);
       this.gpu.run(this.kernels.sigmoidGate, [w.attnGate, w.attention], [n * c.heads * c.headDim], Math.ceil(n * c.heads * c.headDim / 256));
       await this.linear(prefix + 'attn_output.weight', w.attention, w.projection, n, signal);
     }
@@ -179,19 +186,21 @@ export class PagedEngine {
   async *generate(messages: Message[], options: GenerationOptions = {}, signal?: AbortSignal): AsyncGenerator<TokenEvent> {
     if (this.busy) throw new Error('A generation is already running.');
     if (this.disposed || !this.pager) throw new Error('Load a model first.');
-    if (!Array.isArray(messages) || !messages.length || messages.some(m => !['user', 'assistant'].includes(m.role) || typeof m.content !== 'string' || m.content.length > 16000)) throw new Error('Provide user/assistant text messages (at most 16,000 characters each).');
+    if (!Array.isArray(messages) || !messages.length || messages.some(m => !['user', 'assistant'].includes(m.role) || typeof m.content !== 'string' || m.content.length > MAX_MESSAGE_CHARS)) throw new Error(`Provide user/assistant text messages (at most ${MAX_MESSAGE_CHARS.toLocaleString()} characters each).`);
     const maxTokens = options.maxTokens ?? 128;
-    if (!Number.isInteger(maxTokens) || maxTokens < 1 || maxTokens > 2048) throw new Error('maxTokens must be 1–2048.');
+    if (!Number.isInteger(maxTokens) || maxTokens < 1 || maxTokens > MAX_CONTEXT) throw new Error(`maxTokens must be 1–${MAX_CONTEXT}.`);
     const temperature = options.temperature ?? 0.7, topK = options.topK ?? 40, topP = options.topP ?? 0.9;
     if (!Number.isFinite(temperature) || temperature < 0 || temperature > 2 || !Number.isInteger(topK) || topK < 1 || topK > 200 || !Number.isFinite(topP) || topP <= 0 || topP > 1) throw new Error('Invalid sampling settings.');
     this.busy = true;
     try {
       const prompt = this.tokenizer.chat(messages);
-      if (prompt.length >= this.context) throw new Error(`The prompt has ${prompt.length} tokens; the context limit is ${this.context}. Start a new chat or reload with a longer context.`);
+      const limit = outputLimit(maxTokens, prompt.length, this.context);
       let shared = 0;
       while (shared < prompt.length && shared < this.tokensInCache.length && prompt[shared] === this.tokensInCache[shared]) shared++;
       // Last prompt token must be evaluated to obtain logits even for an exact-prefix retry.
       shared = Math.min(shared, prompt.length - 1);
+      // Sliding rings cannot rewind to an earlier prefix after newer keys overwrite it.
+      if (this.config.architecture === 'gemma3' && shared < this.tokensInCache.length && this.kvCapacities.some(capacity => capacity < this.context)) shared = 0;
       // A recurrent state cannot be rewound like a KV cache. Rebuild on every new
       // request so edits, retries, cancellation and multi-turn chat are deterministic.
       if (this.config.recurrent) {
@@ -207,12 +216,12 @@ export class PagedEngine {
         this.tokensInCache.push(...batch);
       }
       const generated: number[] = []; let text = '';
-      for (let i = 0; i < Math.min(maxTokens, this.context - prompt.length); i++) {
+      for (let i = 0; i < limit; i++) {
         signal?.throwIfAborted(); const token = sample(values!, temperature, topK, topP);
         if (this.tokenizer.eos.has(token)) break;
         generated.push(token); const full = this.tokenizer.decode(generated), delta = full.slice(text.length); text = full;
-        yield { token, text, delta, tokens: generated.length, seconds: (performance.now() - started) / 1000, stats: this.pager.snapshot() };
-        if (i + 1 < Math.min(maxTokens, this.context - prompt.length)) {
+        yield { token, text, delta, tokens: generated.length, promptTokens: prompt.length, contextLength: this.context, seconds: (performance.now() - started) / 1000, stats: this.pager.snapshot() };
+        if (i + 1 < limit) {
           values = await this.forward([token], this.tokensInCache.length, true, signal); this.tokensInCache.push(token);
         }
       }

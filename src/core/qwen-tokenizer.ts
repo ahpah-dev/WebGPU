@@ -1,4 +1,5 @@
 import type { Metadata } from './gguf.ts';
+import { mergeSymbols } from './bpe.ts';
 
 // Qwen3.8's Unicode pre-tokenizer, followed by GPT-2 byte encoding and ranked BPE.
 // Contractions alone are case-insensitive; the Unicode letter/mark classes are not.
@@ -31,16 +32,9 @@ export class QwenTokenizer {
   encodeText(text: string): number[] {
     const result: number[] = [], encoder = new TextEncoder();
     for (const piece of text.normalize('NFC').matchAll(pieces)) {
-      const symbols = Array.from(encoder.encode(piece[0]), b => this.alphabet[b]);
-      while (symbols.length > 1) {
-        let best = Infinity, at = -1;
-        for (let i = 0; i < symbols.length - 1; i++) {
-          const rank = this.ranks.get(symbols[i] + ' ' + symbols[i + 1]);
-          if (rank !== undefined && rank < best) { best = rank; at = i; }
-        }
-        if (at < 0) break;
-        symbols.splice(at, 2, symbols[at] + symbols[at + 1]);
-      }
+      const symbols = mergeSymbols(Array.from(encoder.encode(piece[0]), b => this.alphabet[b]), (a, b) => {
+        const rank = this.ranks.get(a + ' ' + b); return rank === undefined ? undefined : -rank;
+      });
       for (const symbol of symbols) {
         const id = this.ids.get(symbol);
         if (id === undefined || this.types[id] !== 1) throw new Error('Invalid byte-BPE merge result.');
@@ -55,7 +49,8 @@ export class QwenTokenizer {
     for (const m of messages) {
       ids.push(this.special('<|im_start|>'), ...this.encodeText(m.role + '\n'));
       if (m.role === 'assistant') ids.push(...emptyThinking());
-      ids.push(...this.encodeText(m.content.trim()), this.special('<|im_end|>'), ...this.encodeText('\n'));
+      for (const token of this.encodeText(m.content.trim())) ids.push(token);
+      ids.push(this.special('<|im_end|>'), ...this.encodeText('\n'));
     }
     // Explicit non-thinking mode saves the small browser context for the answer.
     ids.push(this.special('<|im_start|>'), ...this.encodeText('assistant\n'), ...emptyThinking());

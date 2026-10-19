@@ -1,5 +1,15 @@
 # Validation — 2026-10-19
 
+## Extended context and output (0.5.0)
+
+- All 32 Node tests pass, including generation of 3,096 deterministic tokens through the real generation loop with a synthetic forward pass. This crosses the old 2,048-token cap and ends at the exact shared-context boundary. No claim of a full 32K model reply is made from that test.
+- The actual Qwen3.8 27B Q4_K_M model loaded a 32,768-token context and accepted a 32,768-token output request. It generated `Paris` from a 20-token prompt in 170.7 seconds before manual cancellation. Peak tracked GPU buffers were 5.99 GiB under a 6 GiB budget. This used the browser File API, with no model byte server. [Raw UI result](context-smoke.json). The first HTTP run was interrupted after its source was removed from Ollama storage; it was not an inference failure.
+- Real WebGPU tiled attention matches an independent CPU two-pass softmax reference at positions 2,047–2,049 and 32,765–32,767, with head dimensions 128, 256, and 512. Maximum absolute error is below `5e-7`. Sliding-cache wrap is checked for a batch of eight queries at positions 32,760–32,767.
+- Existing quantized matmul, Qwen recurrent, normalization, RoPE, and queue-ordering GPU checks still pass. Raw output: [context-gpu-checks.txt](context-gpu-checks.txt).
+- Both tokenizers handle 200,000-character messages without overflowing JavaScript's argument stack. Heap BPE is checked against the former scan algorithm with 200 varied inputs, including ties and invalidated neighboring pairs. Existing Qwen reference token IDs remain unchanged.
+- UI context options reach 32,768, output options reach 32,768, defaults are 4,096 / 2,048, and individual messages can contain 1,048,576 JavaScript characters. The actual reply is limited to context minus prompt/history/framing, or EOS.
+- Browser model tests use local model bytes only; no native or cloud inference is involved. Full 32K prompts and 32K replies have not been benchmarked end to end. Long-context quality is not measured by these kernel checks.
+
 ## Qwen3.8 27B generation
 
 The real `qwen3.8:27b` Q4_K_M GGUF generated `Paris` using the standalone browser SDK. The full text model ran in WGSL/JavaScript inside the browser; the loopback server supplied file ranges only. [Raw benchmark record](qwen38-benchmark.json).

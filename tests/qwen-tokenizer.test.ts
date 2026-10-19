@@ -31,3 +31,9 @@ test('Qwen decode withholds incomplete UTF-8 and rejects an incompatible tokeniz
   assert.equal(tokenizer.decode([byteF0]), '');
   assert.throws(() => new QwenTokenizer(new Map([...metadata, ['tokenizer.ggml.pre', 'qwen2']])));
 });
+
+test('long Qwen chat content bypasses the JavaScript argument-stack limit', () => {
+  const tokenizer = new QwenTokenizer(metadata), text = '0123456789'.repeat(20000);
+  const ids = tokenizer.chat([{ role: 'user', content: text }]);
+  assert.ok(ids.length > 200000); assert.ok(tokenizer.decode(ids).includes(text));
+});

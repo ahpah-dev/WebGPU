@@ -1,6 +1,7 @@
 import './style.css';
 import { WebGPU, type Message, type ModelInfo, type Progress, type SourceInput } from './sdk.ts';
 import { createOllamaPicker } from './ollama-picker.ts';
+import { attentionMemory } from './core/context.ts';
 
 const icons: Record<string, string> = {
   chat: '<path d="M21 11a8 8 0 0 1-8 8H5l-3 3V11a9 9 0 0 1 18-2"/><path d="M7 10h8M7 14h5"/>',
@@ -29,7 +30,7 @@ let sharedSource: SourceInput | undefined;
 $('app').innerHTML = `
 <aside class="sidebar">
   <a class="brand" aria-label="WebGPU home" href="#playground"><span class="brandmark">W</span><span>WebGPU<span class="brand-dot">.</span></span></a>
-  <span class="edition">BROWSER INFERENCE / 0.4</span>
+  <span class="edition">BROWSER INFERENCE / 0.5</span>
   <button id="new-chat" aria-label="New conversation" class="new-chat">${icon('plus')}<span>New conversation</span><span class="key">↵</span></button>
   <div class="nav-label">WORKSPACE</div>
   <nav aria-label="Main navigation">
@@ -51,13 +52,13 @@ $('app').innerHTML = `
         <div class="chat-panel panel"><div class="panel-top"><div class="panel-title">${icon('chat')} Conversation <span class="subtle-badge" id="chat-model">No model</span></div><button class="text-button" id="export-chat">Export ${icon('link')}</button></div>
           <div id="conversation" class="conversation" aria-live="polite"><div class="empty-chat" id="empty-chat"><div class="empty-symbol">${icon('spark')}</div><h2>A bigger model. A smaller footprint.</h2><p>Open Qwen3.8 27B or Gemma 3 GGUF weights.<br>The model stays on your disk. Inference stays in this tab.</p><div class="model-open-actions"><button class="primary" id="open-ollama-empty">${icon('box')} Open from Ollama</button><button class="secondary" id="choose-empty">${icon('upload')} Choose GGUF file</button></div><div class="starter-prompts"><button data-prompt="Explain gravity in one sentence.">Explain a concept <span>↗</span></button><button data-prompt="Write a short Python function that checks whether a number is prime.">Write some code <span>↗</span></button></div></div></div>
           <div class="generation-progress" id="generation-progress" hidden><div><span id="progress-text">Preparing…</span><span id="progress-percent">0%</span></div><div class="progress-track"><i id="progress-bar"></i></div></div>
-          <form id="chat-form" class="composer"><textarea id="prompt" rows="2" placeholder="Ask something. Keep it local." aria-label="Message" maxlength="16000"></textarea><div class="composer-bottom"><span>${icon('shield')} Private · no cloud inference</span><button class="send-button" id="send" type="submit" aria-label="Send message" disabled>${icon('arrow')}</button><button class="send-button stop" id="stop" type="button" aria-label="Stop generation" hidden>${icon('stop')}</button></div></form><div class="chat-foot"><span>Enter to send · Shift + Enter for a new line</span><span id="token-stats">Ready when you are</span></div>
+          <form id="chat-form" class="composer"><textarea id="prompt" rows="2" placeholder="Ask something. Keep it local." aria-label="Message" maxlength="1048576"></textarea><div class="composer-bottom"><span>${icon('shield')} Private · no cloud inference</span><button class="send-button" id="send" type="submit" aria-label="Send message" disabled>${icon('arrow')}</button><button class="send-button stop" id="stop" type="button" aria-label="Stop generation" hidden>${icon('stop')}</button></div></form><div class="chat-foot"><span>Enter to send · Shift + Enter for a new line</span><span id="token-stats">Ready when you are</span></div>
         </div>
         <aside class="settings-panel panel"><div class="panel-top"><div class="panel-title">${icon('chip')} Run configuration</div></div><div class="settings-body">
           <label class="field-label">LOCAL MODEL <span>OLLAMA / GGUF</span></label><button id="open-ollama" class="secondary full ollama-browse">${icon('box')} Open from Ollama</button><button id="choose-model" class="model-picker">${icon('box')}<span id="model-filename">Select a model file<small>Qwen3.8 · Gemma 3 · GGUF</small></span>${icon('plus')}</button><button id="shared-model" class="shared-model" hidden>Use locally served model →</button>
           <div class="field-divider"></div><label class="field-label" for="performance">PERFORMANCE</label><select id="performance"><option value="low-memory" selected>Memory saver · 2 GiB preset</option><option value="fast">Faster · 6 GiB preset</option></select><p id="performance-help" class="field-help">Memory saver keeps GPU use low. Faster keeps more weights resident and reads larger chunks. Apply & reload after changing modes.</p><label class="field-label" for="budget">GPU MEMORY BUDGET <span id="budget-display">2 GiB</span></label><input id="budget" type="range" min="1024" max="8192" step="1024" value="2048"><div class="range-labels"><span>1 GiB</span><span>8 GiB</span></div><p class="field-help">Weights that don't fit stream from disk. More memory can reduce repeated reads.</p>
-          <label class="field-label" for="context">CONTEXT LENGTH</label><select id="context"><option value="256">256 tokens · minimum memory</option><option value="512" selected>512 tokens · balanced</option><option value="1024">1,024 tokens</option><option value="2048">2,048 tokens</option></select>
-          <div class="field-pair"><div><label class="field-label" for="temperature">TEMPERATURE</label><input id="temperature" type="number" min="0" max="2" step="0.1" value="0.7"></div><div><label class="field-label" for="max-tokens">MAX OUTPUT</label><select id="max-tokens"><option value="16">16 tokens</option><option value="32">32 tokens</option><option value="64" selected>64 tokens</option><option value="128">128 tokens</option><option value="256">256 tokens</option></select></div></div>
+          <label class="field-label" for="context">CONTEXT LENGTH</label><select id="context"><option value="256">256 tokens · minimum memory</option><option value="512">512 tokens</option><option value="1024">1,024 tokens</option><option value="2048">2,048 tokens</option><option value="4096" selected>4,096 tokens · balanced</option><option value="8192">8,192 tokens</option><option value="16384">16,384 tokens</option><option value="32768">32,768 tokens</option></select><p id="context-help" class="field-help">Context includes your prompt, chat history and reply. Longer contexts need more GPU memory. Apply & reload to change context.</p>
+          <div class="field-pair"><div><label class="field-label" for="temperature">TEMPERATURE</label><input id="temperature" type="number" min="0" max="2" step="0.1" value="0.7"></div><div><label class="field-label" for="max-tokens">MAX OUTPUT</label><select id="max-tokens"><option value="16">16 tokens</option><option value="32">32 tokens</option><option value="64">64 tokens</option><option value="128">128 tokens</option><option value="256">256 tokens</option><option value="512">512 tokens</option><option value="1024">1,024 tokens</option><option value="2048" selected>2,048 tokens</option><option value="4096">4,096 tokens</option><option value="8192">8,192 tokens</option><option value="16384">16,384 tokens</option><option value="32768">32,768 tokens</option></select></div></div><p id="output-help" class="field-help">Reply length is capped by the space left in the loaded context. You can change output length without reloading.</p>
           <button id="reload" class="secondary full" disabled>Apply & reload model</button><div class="memory-note">${icon('disk')}<p><strong>Big models, streamed in pieces.</strong>A 27B model can exceed your GPU's memory. Paging makes it fit by trading speed for memory.</p></div>
         </div></aside>
       </div>
@@ -108,7 +109,7 @@ function setBusy(value: boolean) {
   busy = value; $<HTMLButtonElement>('send').disabled = value || !info;
   $('send').hidden = value; $('stop').hidden = !value;
   for (const id of ['choose-model', 'choose-library', 'choose-qwen', 'choose-empty', 'shared-model', 'new-chat', 'open-ollama', 'open-ollama-empty', 'open-ollama-library']) { const el = $<HTMLButtonElement>(id); if (el) el.disabled = value; }
-  for (const id of ['performance', 'budget', 'context']) $<HTMLInputElement>(id).disabled = value;
+  for (const id of ['performance', 'budget', 'context', 'max-tokens']) $<HTMLInputElement>(id).disabled = value;
   $<HTMLButtonElement>('reload').disabled = value || !source;
   $('generation-progress').hidden = !value;
 }
@@ -122,14 +123,17 @@ function onProgress(p: Progress) {
   if (p.layer !== undefined) $('layers').querySelectorAll<HTMLElement>('span').forEach((el, i) => el.classList.toggle('current', i === p.layer));
 }
 runtime.onProgress = onProgress;
-async function loadModel(selected: SourceInput) {
+async function loadModel(selected: SourceInput, preserveConversation = false) {
   if (busy) return; clearNotice(); source = selected; info = undefined; switchPage('playground'); setBusy(true);
   runtime.dispose(); runtime = new WebGPU(); runtime.onProgress = onProgress;
   try {
     const mode = $<HTMLSelectElement>('performance').value as 'low-memory' | 'fast';
     const loaded = await runtime.load(selected, { gpuBudgetMiB: Number($<HTMLInputElement>('budget').value), contextLength: Number($<HTMLSelectElement>('context').value), batchSize: mode === 'fast' ? 128 : 32, performance: mode });
-    info = loaded; messages = []; $('conversation').replaceChildren();
-    const ready = document.createElement('div'); ready.className = 'ready-message'; ready.innerHTML = `${icon('spark')}<h2>Ready for a bigger conversation.</h2><p>Model loaded. Weight pages will stream from disk as you generate.</p>`; $('conversation').append(ready);
+    info = loaded;
+    if (!preserveConversation || !messages.length) {
+      messages = []; $('conversation').replaceChildren();
+      const ready = document.createElement('div'); ready.className = 'ready-message'; ready.innerHTML = `${icon('spark')}<h2>Ready for a bigger conversation.</h2><p>Model loaded. Weight pages will stream from disk as you generate.</p>`; $('conversation').append(ready);
+    }
     $('stat-params').textContent = `${(loaded.config.parameters / 1e9).toFixed(1)}B`;
     $('chat-model').textContent = loaded.config.name;
     $('model-filename').textContent = selected instanceof File ? selected.name : selected.name || 'Local GGUF';
@@ -138,12 +142,22 @@ async function loadModel(selected: SourceInput) {
     $('runtime-pages').textContent = `${loaded.stats.pageBytes / 1024 ** 2} MiB pages`; $('runtime-batch').textContent = `Prompt batches: up to ${loaded.batchSize} tokens.`;
     $('runtime-file').textContent = gib(loaded.fileBytes); $('layer-count').textContent = `${loaded.config.layers} layers${loaded.config.recurrent ? ` · ${recurrentCount} recurrent / ${loaded.config.layers - recurrentCount} full attention` : ''}`;
     $('layers').replaceChildren(...Array.from({ length: loaded.config.layers }, (_, i) => { const span = document.createElement('span'); span.textContent = String(i + 1).padStart(2, '0'); span.title = `Layer ${i + 1}: ${loaded.config.recurrent?.layers[i] ? 'recurrent attention' : 'attention'}`; return span; }));
-    updateStats(loaded.stats); $('adapter-name').textContent = loaded.adapter;
+    updateStats(loaded.stats); $('adapter-name').textContent = loaded.adapter; updateContextHelp();
     notify(`${loaded.config.name} is ready. ${gib(loaded.fileBytes)} of weights will be paged within a ${loaded.gpuBudgetMiB / 1024} GiB GPU allocation budget.`);
     switchPage('playground'); $<HTMLTextAreaElement>('prompt').focus();
   } catch (e) { notify(e instanceof Error ? e.message : String(e), true); }
-  finally { setBusy(false); }
+  finally { setBusy(false); updateContextHelp(); }
 }
+function updateContextHelp() {
+  const context = Number($<HTMLSelectElement>('context').value), batch = $<HTMLSelectElement>('performance').value === 'fast' ? 128 : 32;
+  const pending = info && context !== info.contextLength ? ` Loaded context: ${info.contextLength.toLocaleString()} tokens. Apply & reload to use ${context.toLocaleString()}.` : '';
+  const memory = info ? attentionMemory(info.config, context, batch).totalBytes : 0;
+  $('context-help').textContent = `Context includes your prompt, chat history and reply.${info ? ` This model needs about ${gib(memory)} for attention state, plus working memory and weight cache.` : ' Longer contexts need more GPU memory.'}${pending || ' Apply & reload to change context.'}`;
+  const output = Number($<HTMLSelectElement>('max-tokens').value), loadedContext = info?.contextLength ?? context;
+  $('output-help').textContent = `Up to ${output.toLocaleString()} reply tokens, limited by the space left in the ${loadedContext.toLocaleString()}-token ${info ? 'loaded ' : ''}context. Output length changes without reloading.`;
+}
+for (const id of ['context', 'max-tokens']) $(id).addEventListener('change', updateContextHelp);
+updateContextHelp();
 const pick = () => $<HTMLInputElement>('model-file').click();
 const openOllama = createOllamaPicker(loadModel, pick, () => busy);
 for (const id of ['open-ollama', 'open-ollama-empty', 'open-ollama-library']) $(id).addEventListener('click', openOllama);
@@ -151,13 +165,14 @@ if (new URLSearchParams(location.search).get('models') === 'ollama') openOllama(
 for (const id of ['choose-empty', 'choose-model', 'choose-library', 'choose-qwen']) $(id).addEventListener('click', pick);
 $<HTMLInputElement>('model-file').addEventListener('change', e => { const file = (e.target as HTMLInputElement).files?.[0]; if (file) void loadModel(file); });
 $('shared-model').addEventListener('click', () => { if (sharedSource) void loadModel(sharedSource); });
-$('reload').addEventListener('click', () => { if (source) void loadModel(source); });
+$('reload').addEventListener('click', () => { if (source) void loadModel(source, true); });
 $<HTMLSelectElement>('performance').addEventListener('change', () => {
   const fast = $<HTMLSelectElement>('performance').value === 'fast', budget = fast ? 6144 : 2048;
   $<HTMLInputElement>('budget').value = String(budget); $('budget-display').textContent = `${budget / 1024} GiB`;
   if (!info) $('stat-budget').textContent = `${(budget / 1024).toFixed(1)} GiB`;
   $('reload').textContent = fast ? 'Apply Faster & reload model' : 'Apply & reload model';
   $('performance-help').textContent = fast ? 'Faster uses a 6 GiB GPU budget, up to 64 MiB pages and batches of 128 prompt tokens. Adjust the budget to fit your GPU. The first prompt still reads the model; later tokens can reuse more weights. Apply & reload to activate.' : 'Memory saver uses a 2 GiB GPU preset and 16 MiB pages. Apply & reload to activate.';
+  updateContextHelp();
 });
 $<HTMLInputElement>('budget').addEventListener('input', () => { const n = Number($<HTMLInputElement>('budget').value) / 1024; $('budget-display').textContent = `${n} GiB`; if (!info) $('stat-budget').textContent = `${n.toFixed(1)} GiB`; });
 $('stop').addEventListener('click', () => { runtime.stop(); $('progress-text').textContent = 'Stopping at the next page boundary…'; });
@@ -174,15 +189,17 @@ $('chat-form').addEventListener('submit', async e => {
   clearNotice(); $('conversation').querySelector('.ready-message')?.remove();
   const history: Message[] = [...messages, { role: 'user', content: prompt }];
   appendMessage('user', prompt); const answer = appendMessage('assistant', 'Loading weight pages…');
-  $<HTMLTextAreaElement>('prompt').value = ''; setBusy(true); let text = '';
+  $<HTMLTextAreaElement>('prompt').value = ''; setBusy(true); let text = '', lastChunk: { tokens: number; promptTokens: number; contextLength: number } | undefined;
   try {
     for await (const chunk of runtime.generate(history, { maxTokens: Number($<HTMLSelectElement>('max-tokens').value), temperature: Number($<HTMLInputElement>('temperature').value) })) {
-      text = chunk.text; answer.textContent = text || '…'; updateStats(chunk.stats);
-      $('token-stats').textContent = `${chunk.tokens} tokens · ${chunk.seconds.toFixed(1)}s including prompt`;
+      text = chunk.text; lastChunk = chunk; answer.textContent = text || '…'; updateStats(chunk.stats);
+      $('token-stats').textContent = `${chunk.tokens.toLocaleString()} reply ${chunk.tokens === 1 ? 'token' : 'tokens'} · ${(chunk.promptTokens + chunk.tokens).toLocaleString()} / ${chunk.contextLength.toLocaleString()} context · ${chunk.seconds.toFixed(1)}s`;
       $('conversation').scrollTop = $('conversation').scrollHeight;
     }
     messages = [...history, { role: 'assistant', content: text }];
     if (!text) answer.textContent = '(The model ended its turn.)';
+    if (lastChunk && lastChunk.promptTokens + lastChunk.tokens >= lastChunk.contextLength) notify('Context is full. Start a new conversation or apply a larger context.');
+    else if (lastChunk && lastChunk.tokens >= Number($<HTMLSelectElement>('max-tokens').value)) notify('Reply reached the selected output limit. Increase Max output for longer replies.');
   } catch (e) {
     if (e instanceof Error && e.name === 'AbortError') { answer.textContent = text || '(Stopped.)'; if (text) messages = [...history, { role: 'assistant', content: text }]; }
     else { answer.textContent = text || 'Generation could not complete.'; notify(e instanceof Error ? e.message : String(e), true); }

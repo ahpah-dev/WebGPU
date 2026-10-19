@@ -31,3 +31,10 @@ test('reader rejects unrecognized files and unsupported GGUF versions', () => {
   const bytes = new Uint8Array(24), view = new DataView(bytes.buffer); view.setUint32(0, 0x46554747, true); view.setUint32(4, 99, true);
   assert.throws(() => parseGGUFHeader(bytes, 24), /version/);
 });
+
+test('removing a served model reports an unavailable file instead of a Range configuration error', async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => new Response('', { status: 404 });
+  try { await assert.rejects(makeSource({ url: 'http://localhost/test.gguf', size: 100 }).read(0, 16), /model file is no longer available/); }
+  finally { globalThis.fetch = original; }
+});

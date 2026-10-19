@@ -91,25 +91,33 @@ export function attentionShader(context: number): string {
 @group(0) @binding(1) var<storage,read> k:array<f32>;
 @group(0) @binding(2) var<storage,read> v:array<f32>;
 @group(0) @binding(3) var<storage,read_write> y:array<f32>;
-struct P{heads:u32,kvHeads:u32,hd:u32,start:u32,scale:f32,window:u32,pad0:u32,pad1:u32}
+struct P{heads:u32,kvHeads:u32,hd:u32,start:u32,scale:f32,window:u32,capacity:u32,pad1:u32}
 @group(0) @binding(4) var<uniform> p:P;
-var<workgroup> scores:array<f32,${context}>;
+// Online softmax over fixed-size tiles: shared memory is independent of context.
+var<workgroup> scores:array<f32,64>;
 ${reduction}
 @compute @workgroup_size(64)
 fn main(@builtin(local_invocation_index) lane:u32,@builtin(workgroup_id) g:vec3<u32>){
   let end=p.start+g.y+1u;let begin=end-min(end,p.window);let head=g.x/(p.heads/p.kvHeads);
   let qb=(g.y*p.heads+g.x)*p.hd;let kvStride=p.kvHeads*p.hd;
-  var maximum=-3.402823e38;
-  for(var t=begin+lane;t<end;t+=64u){
-    var dot=0.0;for(var d=0u;d<p.hd;d++){dot+=q[qb+d]*k[t*kvStride+head*p.hd+d];}
-    scores[t]=dot*p.scale;maximum=max(maximum,scores[t]);
+  let capacity=select(${context}u,p.capacity,p.capacity>0u);
+  var maximum=-3.402823e38;var total=0.0;var accumulated:array<f32,8>;
+  for(var tile=begin;tile<end;tile+=64u){
+    let t=tile+lane;var score=-3.402823e38;
+    if(t<end){var dot=0.0;for(var d=0u;d<p.hd;d++){dot+=q[qb+d]*k[(t%capacity)*kvStride+head*p.hd+d];}score=dot*p.scale;}
+    sums[lane]=score;workgroupBarrier();
+    for(var s=32u;s>0u;s/=2u){if(lane<s){sums[lane]=max(sums[lane],sums[lane+s]);}workgroupBarrier();}
+    let nextMaximum=max(maximum,sums[0]);workgroupBarrier();
+    let correction=exp(maximum-nextMaximum);
+    scores[lane]=select(0.0,exp(score-nextMaximum),t<end);workgroupBarrier();
+    let tileTotal=reduceSum(lane,scores[lane]);workgroupBarrier();
+    for(var d=lane;d<p.hd;d+=64u){
+      var sum=0.0;for(var j=0u;j<min(64u,end-tile);j++){sum+=scores[j]*v[((tile+j)%capacity)*kvStride+head*p.hd+d];}
+      accumulated[d/64u]=accumulated[d/64u]*correction+sum;
+    }
+    total=total*correction+tileTotal;maximum=nextMaximum;workgroupBarrier();
   }
-  sums[lane]=maximum;workgroupBarrier();
-  for(var s=32u;s>0u;s/=2u){if(lane<s){sums[lane]=max(sums[lane],sums[lane+s]);}workgroupBarrier();}
-  let maxScore=sums[0];workgroupBarrier();var total=0.0;
-  for(var t=begin+lane;t<end;t+=64u){scores[t]=exp(scores[t]-maxScore);total+=scores[t];}
-  let divisor=reduceSum(lane,total);workgroupBarrier();
-  for(var d=lane;d<p.hd;d+=64u){var sum=0.0;for(var t=begin;t<end;t++){sum+=scores[t]/divisor*v[t*kvStride+head*p.hd+d];}y[qb+d]=sum;}
+  for(var d=lane;d<p.hd;d+=64u){y[qb+d]=accumulated[d/64u]/total;}
 }`;
 }
 export const addShader = `

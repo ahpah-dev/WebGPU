@@ -1,0 +1,26 @@
+Running…
+Adapter: blackwell
+PASS F32: packed matrix × batch, output offset, input offset
+PASS F16: packed matrix × batch, output offset, input offset
+PASS Q4_0: packed matrix × batch, output offset, input offset
+PASS Q8_0: packed matrix × batch, output offset, input offset
+PASS Q4_K: packed matrix × batch, output offset, input offset
+PASS Q5_K: packed matrix × batch, output offset, input offset
+PASS Q6_K: packed matrix × batch, output offset, input offset
+PASS causal grouped-query attention, window 2, batch 2
+PASS causal grouped-query attention, window 16, batch 2
+PASS RMS normalization
+PASS QK normalization + scaled RoPE
+PASS ordered writes preserve both uses of a recycled weight page
+ALL 12 GPU CHECKS PASSED
+PASS Qwen interleaved Q/gate split and sigmoid attention gate
+PASS causal convolution + SiLU with carried history
+PASS L2 Q/K, decay, tiled V heads and Gated DeltaNet: batch = sequential, carried state and reset
+PASS recurrent RMS norm + SiLU gate and SwiGLU feed-forward activation
+PASS 64/256 partial RoPE at nonzero positions with unrotated tail
+ALL QWEN GPU CHECKS PASSED
+PASS tiled attention: context 4096, positions 2047–2049, head dim 128, window 4096, cache 4096; max error 1.35e-7
+PASS tiled attention: context 32768, positions 32765–32767, head dim 256, window 32768, cache 32768; max error 5.61e-8
+PASS tiled attention: context 32768, positions 32765–32767, head dim 512, window 32768, cache 32768; max error 2.58e-8
+PASS tiled attention: context 32768, positions 32760–32767, head dim 128, window 129, cache 136; max error 4.63e-7
+ALL GPU CHECKS PASSED, INCLUDING 32K CONTEXT

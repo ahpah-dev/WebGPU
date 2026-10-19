@@ -131,7 +131,25 @@ model.dispose();  // Terminate the worker and release resources.
 
 `load` also accepts `{url, size, name}` for a file server with exact HTTP 206 ranges. A server that ignores the Range header is rejected instead of downloading a multi-gigabyte file into memory.
 
-This API is a browser JavaScript API, not a network REST server. Only one load or generation can run at a time. Supported context lengths are 256, 512, 1024, and 2048 tokens. When a prompt does not fit, the caller receives an error; history is not silently discarded. When generation reaches the remaining context limit, it ends.
+This API is a browser JavaScript API, not a network REST server. Only one load or generation can run at a time. Context accepts any integer from **256 to 32,768 tokens**, bounded by the model's declared context and available GPU memory. `maxTokens` accepts **1–32,768**. The prompt, chat history, framing, and reply share the context: a 4,000-token prompt in a 32,768-token context leaves at most 28,768 reply tokens. EOS can end a reply earlier. Oversized prompts fail without silently dropping history.
+
+For long conversations:
+
+```js
+await model.load(file, {
+  performance: 'fast',
+  gpuBudgetMiB: 6144,
+  contextLength: 32768,
+});
+for await (const token of model.generate(messages, { maxTokens: 8192 })) {
+  output.textContent = token.text;
+  console.log(`${token.promptTokens + token.tokens}/${token.contextLength} context tokens`);
+}
+```
+
+The UI defaults to a **4,096-token context / 2,048-token output limit** and offers 8K, 16K, and 32K settings. Apply & reload changes context while retaining the conversation in the current page; changing output length needs no reload. Opening a different model starts a fresh conversation. The SDK retains its 512-token context / 128-token output defaults for compatibility. Individual messages can contain up to 1,048,576 JavaScript characters; the tokenized context limit still applies.
+
+Attention uses fixed 64-token tiles with online softmax, so shared shader memory does not grow with context. Gemma sliding-attention layers use ring buffers sized to the sliding window plus prompt-batch overlap. Full-attention KV state still grows with context. Qwen3.8 27B at 32K needs about **4.15 GiB for attention/recurrent state alone**, plus working buffers and cached weights; use the Faster 6 GiB preset on hardware with enough headroom. A longer context leaves less of the same GPU budget for weight caching and can slow generation. The engine checks the budget, model context, and browser buffer limits before allocating the cache.
 
 `performance` accepts `'low-memory'` (the default) or `'fast'`. Explicit `gpuBudgetMiB` and `batchSize` override the preset defaults. The low-memory SDK default remains 16 prompt tokens per batch for compatibility; the UI uses 32. Supported batches are 1, 8, 16, 32, 64, and 128. `ModelInfo` reports `performance`, `batchSize`, and the actual `stats.pageBytes`.
 
@@ -157,7 +175,7 @@ Pager tests check larger pages, fixed cache reuse, bounded GPU allocations, adap
 - Qwen chat runs in non-thinking mode. Images, video, tool execution, speculative MTP decoding, and extended reasoning controls are not exposed.
 - Does not implement arbitrary model architectures, image/audio encoders, split GGUF files, or every GGML quantization format.
 - Does not provide a CPU-only fallback if WebGPU is unavailable.
-- Uses f32 attention state. Gemma caches all layers, including local layers; Qwen allocates KV only for full-attention layers, plus fixed recurrent state. Context is limited to 256–2048 tokens here, regardless of a model's advertised context.
+- Uses f32 attention state. Gemma local layers use bounded sliding caches; full-attention layers retain the configured context. Qwen allocates KV only for full-attention layers, plus fixed recurrent state. Runtime context is capped at 32,768 tokens even if a model advertises more. Hardware may require a lower setting.
 - Conversations live in page memory and disappear on reload. Use Export to save a transcript.
 - Model loading, token generation, and paging performance vary substantially with hardware and browser. It does not promise fast 27B inference on every GPU.
 

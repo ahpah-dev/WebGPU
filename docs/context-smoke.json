@@ -1,0 +1,13 @@
+{
+  "answer": "Paris",
+  "budgetMiB": 6144,
+  "context": 32768,
+  "gpuAllocated": "5.98 GiB",
+  "gpuPeak": "5.99 GiB",
+  "model": "Qwen3.8 27B 0814",
+  "note": "Short prompt; stopped after one token. This is not a full 32K prompt or reply benchmark.",
+  "outputLimit": 32768,
+  "performance": "fast",
+  "source": "Browser File API",
+  "tokenStats": "1 reply tokens · 21 / 32,768 context · 170.7s"
+}

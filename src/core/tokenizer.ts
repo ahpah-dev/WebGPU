@@ -1,4 +1,5 @@
 import type { Metadata } from './gguf.ts';
+import { mergeSymbols } from './bpe.ts';
 
 /** SentencePiece BPE merge scores from GGUF, with UTF-8 byte fallback. */
 export class Tokenizer {
@@ -24,16 +25,9 @@ export class Tokenizer {
   special(s: string): number { const id = this.ids.get(s); if (id === undefined) throw new Error(`Tokenizer lacks ${s}.`); return id; }
   encodeText(text: string): number[] {
     // Gemma uses identity normalization and U+2581 to encode spaces.
-    const symbols = Array.from((this.prefix ? ' ' : '') + text).map(s => s === ' ' ? '\u2581' : s);
-    while (symbols.length > 1) {
-      let best = -Infinity, index = -1;
-      for (let i = 0; i < symbols.length - 1; i++) {
-        const id = this.ids.get(symbols[i] + symbols[i + 1]);
-        if (id !== undefined && (this.types?.[id] ?? 1) === 1 && this.scores[id] > best) { best = this.scores[id]; index = i; }
-      }
-      if (index < 0) break;
-      symbols.splice(index, 2, symbols[index] + symbols[index + 1]);
-    }
+    const symbols = mergeSymbols(Array.from((this.prefix ? ' ' : '') + text).map(s => s === ' ' ? '\u2581' : s), (a, b) => {
+      const id = this.ids.get(a + b); return id !== undefined && (this.types?.[id] ?? 1) === 1 ? this.scores[id] : undefined;
+    });
     const result: number[] = [], encoder = new TextEncoder();
     for (const symbol of symbols) {
       const id = this.ids.get(symbol);
@@ -45,7 +39,9 @@ export class Tokenizer {
   chat(messages: { role: 'user' | 'assistant'; content: string }[]): number[] {
     const ids = [this.bos];
     for (const message of messages) {
-      ids.push(this.special('<start_of_turn>'), ...this.encodeText(`${message.role === 'assistant' ? 'model' : 'user'}\n${message.content.trim()}`), this.special('<end_of_turn>'), ...this.encodeText('\n'));
+      ids.push(this.special('<start_of_turn>'));
+      for (const token of this.encodeText(`${message.role === 'assistant' ? 'model' : 'user'}\n${message.content.trim()}`)) ids.push(token);
+      ids.push(this.special('<end_of_turn>'), ...this.encodeText('\n'));
     }
     ids.push(this.special('<start_of_turn>'), ...this.encodeText('model\n'));
     return ids;

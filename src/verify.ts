@@ -4,6 +4,7 @@ import { decodeWeight } from './core/quant.ts';
 import { QUANTS } from './core/gguf.ts';
 import { WebGPU } from './sdk.ts';
 import { verifyQwen } from './verify-qwen.ts';
+import { verifyContext } from './verify-context.ts';
 const result = document.getElementById('results')!;
 const log = (s: string) => { result.textContent += s + '\n'; };
 let model: WebGPU | undefined;
@@ -72,6 +73,8 @@ document.getElementById('math')!.onclick = async () => {
     const ordered = new Float32Array(await gpu.read(outputs, 8)); near(ordered[0], 10, 'old page consumed'); near(ordered[1], 26, 'new page consumed');
     log('PASS ordered writes preserve both uses of a recycled weight page'); log('ALL 12 GPU CHECKS PASSED');
     await verifyQwen(gpu, log);
+    await verifyContext(gpu, log);
+    log('ALL GPU CHECKS PASSED, INCLUDING 32K CONTEXT');
   } catch (e) { log(`FAIL: ${e instanceof Error ? e.message : e}`); }
   finally { gpu.dispose(); }
 };
@@ -89,6 +92,23 @@ document.getElementById('model')!.onclick = async () => {
   finally { progress.remove(); }
 };
 document.getElementById('cancel')!.onclick = () => { model?.dispose(); log('Runtime disposed.'); };
+
+document.getElementById('long-context')!.onclick = async () => {
+  model?.dispose(); model = new WebGPU(); result.textContent = 'Loading a 32,768-token context with a 32,768-token output request…\n';
+  const progress = document.createElement('p'); result.before(progress); model.onProgress = p => { progress.textContent = p.detail; };
+  try {
+    const response = await fetch('/api/ollama/models'), catalog = await response.json();
+    const descriptor = catalog.models?.find((m: { name: string; supported: boolean }) => m.name === 'qwen3.8:27b' && m.supported);
+    if (!descriptor) throw new Error('Install qwen3.8:27b in the local Ollama library first.');
+    descriptor.url = new URL(descriptor.url, location.href).href;
+    const info = await model.load(descriptor, { performance: 'fast', gpuBudgetMiB: 6144, contextLength: 32768 }); log(JSON.stringify(info));
+    // Validate the full output request, then stop after one actual token rather than
+    // spending days decoding an intentionally huge answer in a smoke test.
+    for await (const token of model.generate([{ role: 'user', content: 'Write exactly these two words: Paris France' }], { maxTokens: 32768, temperature: 0 })) { log(JSON.stringify(token)); break; }
+    log('32K CONTEXT SMOKE COMPLETE (stopped after one token)');
+  } catch (e) { log(`ERROR: ${e instanceof Error ? e.message : e}`); }
+  finally { model?.dispose(); progress.remove(); }
+};
 
 document.getElementById('speed')!.onclick = async () => {
   result.textContent = 'Comparing Memory saver and Faster using the same local model…\n';

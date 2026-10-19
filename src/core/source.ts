@@ -25,6 +25,7 @@ export function makeSource(input: SourceInput): ByteSource {
       const response = await fetch(descriptor.url, { headers: { Range: `bytes=${offset}-${offset + length - 1}` }, signal });
       if (response.status !== 206 || response.headers.get('Content-Range') !== `bytes ${offset}-${offset + length - 1}/${size}`) {
         await response.body?.cancel();
+        if (response.status === 404) throw new Error('The selected model file is no longer available. Reopen it from your model library or select the local GGUF file.');
         throw new Error('The file server must support exact HTTP Range requests. Select the local GGUF file instead.');
       }
       const bytes = new Uint8Array(await response.arrayBuffer());

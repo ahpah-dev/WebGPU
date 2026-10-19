@@ -23,3 +23,8 @@ test('chat wraps text in model-owned delimiters without interpreting user-writte
   assert.equal(ids.filter(id => id === t.special('<end_of_turn>')).length, 1);
   assert.equal(ids.filter(id => id === t.special('<start_of_turn>')).length, 2);
 });
+
+test('long messages do not overflow the JavaScript argument stack', () => {
+  const t = fixture(), text = 'a'.repeat(200000), ids = t.chat([{ role: 'user', content: text }]);
+  assert.ok(ids.length > 200000); assert.ok(t.decode(ids).includes(text));
+});

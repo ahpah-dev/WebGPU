@@ -18,7 +18,7 @@ export class WebGPU {
     return new Promise((resolve, reject) => {
       this.rejectPending = reject;
       const finish = () => { this.busy = false; this.rejectPending = undefined; this.worker.removeEventListener('message', listener); this.worker.removeEventListener('error', error); };
-      const error = (e: ErrorEvent) => { finish(); reject(new Error(e.message)); };
+      const error = (e: ErrorEvent) => { finish(); reject(new Error(e.message || 'The browser worker could not start. Refresh this page to load the latest app version.')); };
       const listener = (event: MessageEvent) => {
         const m = event.data; if (m.id !== id) return;
         if (m.type === 'progress') this.onProgress?.(m.value);
