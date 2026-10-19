@@ -1,5 +1,29 @@
 # Validation — 2026-10-19
 
+## Coding CLI relay (0.9.0)
+
+`npm start` now exposes a loopback relay on the same port: `POST /v1/messages` (Anthropic Messages), `POST /v1/chat/completions` (OpenAI), `GET /v1/models`, `POST /v1/messages/count_tokens`, and `/health`. The browser tab polls `POST /bridge/poll` with the key from the Developer API page, the relay parks the HTTP request until a tab picks it up, and token events stream back over SSE. Node never computes tokens.
+
+### Verified with a real model
+
+- Qwen3.5 0.8B Q4_K_M in headless Chrome, 32,768-token context, 2,048 MiB budget, loaded from the loopback byte server in **3.1 s**.
+- OpenAI `POST /v1/chat/completions` and Anthropic `POST /v1/messages` both returned `Paris` from the 23-token prompt. The Anthropic stream arrived as `message_start`, `content_block_start`, `content_block_delta`, `content_block_stop`, `message_delta`, `message_stop`.
+- Claude Code (`claude -p "Reply with exactly one word: pong"`) sent a **16,588-character** system prompt plus **23 tool definitions**, streamed the reply from the tab, printed `pong`, and exited 0. The probe used a temporary `CLAUDE_CONFIG_DIR` and cleared inherited `ANTHROPIC_*` model settings so the machine's own routing could not answer instead of this relay.
+
+### Relay behaviour
+
+- One job at a time, with a four-request queue; more queue than that returns `429`. The tab announces model changes immediately through `POST /bridge/hello`; waiting for the next 20-second poll would have left `/v1/models` stale just after a load.
+- A client disconnect marks the job cancelled; the tab receives `{ "cancelled": true }` on its next event and stops generating. SSE comments keep proxies and CLIs alive every 15 seconds.
+- **Bug found and fixed during validation:** the relay failed a running job after 30 seconds because it required a fresh tab poll, but a tab that is generating does not poll. Active jobs now rely on token-event heartbeats and a 300-second idle timeout; only queued jobs require a freshly seen tab.
+- `max_tokens` is clamped to the remaining context using a 3-characters-per-token estimate, because Claude Code asks for 128,000. Requests with no model loaded return `503` instead of hanging.
+- The relay requires the tab's bearer key, binds `127.0.0.1`, and rejects foreign Host headers. Static hosting has no relay, and the Developer API panel says so.
+
+### Tests
+
+- Six new Node tests cover OpenAI and Anthropic streaming, non-streaming aggregation, Anthropic content-block flattening (`system`, `tool_result`), keyless and modelless errors, hello announcement, model listing, token estimation, and malformed bodies. The suite is now **73 passing tests**; `tsc --noEmit` and the production build pass.
+- Tested through `claude` 2.x on Windows; the relay's SSE shape follows the Anthropic streaming event grammar.
+- Tool calling remains unimplemented: Claude Code can answer and stream text, but it cannot emit `tool_use`, so it does not edit files. The practical target is a CLI that works from text completions; the README says this plainly rather than implying agentic parity.
+
 ## Model catalog refresh (0.8.0)
 
 The Model library page no longer leads with Llama 3.2, Qwen2.5, and SmolLM2. It now lists what this engine can run today, newest first:

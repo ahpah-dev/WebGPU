@@ -6,6 +6,8 @@ WebGPU reads a GGUF file in small ranges and runs quantized transformer computat
 
 This is an experimental runtime with a working browser UI and JavaScript SDK. It is not an Ollama inference frontend. No model execution runs in Node, Ollama, a native helper, or a cloud service. The project is named WebGPU and uses the browser's WebGPU standard; it is an independent project.
 
+**Coding CLIs:** `npm start` also starts a loopback relay with Anthropic Messages and OpenAI Chat Completions endpoints. A CLI sends requests to `http://127.0.0.1:8787`, the relay parks them until the open tab picks them up, and tokens stream back from the browser. Claude Code's `-p` mode was verified end to end against Qwen3.5 0.8B. Tool calling is not implemented, so a CLI can answer in text but cannot edit files by itself.
+
 **Verified:** Gemma 3 27B generated `Paris` entirely in the browser with a **2 GiB engine buffer budget**, peaking at **1.983 GiB** of tracked GPU allocations on an RTX 5070. The one-token SDK smoke test took **120 seconds**, including prompt processing; 108 seconds were spent awaiting weight reads. This is a working experimental memory-saving runtime, not a promise of fast inference. See [measured results, screenshots, and test limits](docs/VALIDATION.md).
 
 **Small dense models verified numerically:** Llama 3.x (`llama`), Qwen2.5 (`qwen2`), and Qwen3 (`qwen3`) GGUF files run through the dense decoder with Q/K bias, Q/K normalization, and adjacent-pair or half-split RoPE as the file requires. `npm run check:dense` builds synthetic float32 GGUFs for all three, generates greedy tokens in headless Chrome on real WebGPU hardware, and compares them with an independent CPU reference: **12/12 tokens match** across the three architectures. See [the hardware check](#verification).
@@ -189,7 +191,41 @@ channel.postMessage({
 });
 ```
 
-Events are `ready` (a `ping` reply with the loaded model, architecture, and context length), `chunk` (streamed deltas with token and context counts), `done`, and `error`. A wrong key, no loaded model, a busy runtime, or invalid messages all come back as `error`; one generation runs at a time. There is deliberately no HTTP endpoint: a browser tab cannot accept inbound connections, so a `http://…/v1/chat/completions` URL would be fiction. If you need a REST surface, run a small proxy that forwards into this channel, or use the SDK directly.
+Events are `ready` (a `ping` reply with the loaded model, architecture, and context length), `chunk` (streamed deltas with token and context counts), `done`, and `error`. A wrong key, no loaded model, a busy runtime, or invalid messages all come back as `error`; one generation runs at a time. A browser page cannot accept inbound connections, so the HTTP surface lives in the local server instead: under `npm start`, the same key authorises the coding-CLI relay described below, which forwards requests into this channel. Static hosting, including GitHub Pages, has no relay. If you need a different REST shape, run a proxy that forwards into the channel, or use the SDK directly.
+
+## Coding CLIs
+
+`npm start` starts the static server and a loopback relay on the same port. A CLI sends a normal Anthropic Messages (`/v1/messages`) or OpenAI Chat Completions (`/v1/chat/completions`) request, authenticated with the key shown in the app. The relay parks the request until the open tab polls for it, forwards token events back as SSE, and never evaluates the model in Node.
+
+```sh
+npm run cli -- --key wgpu_sk_…
+npm run cli -- --key wgpu_sk_… -- claude   # launch a CLI with the environment already set
+```
+
+The helper prints the equivalent environment for Claude Code and for OpenAI-compatible tools:
+
+```sh
+# Claude Code
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8787
+export ANTHROPIC_AUTH_TOKEN=wgpu_sk_…
+claude
+
+# Any OpenAI-compatible CLI
+export OPENAI_BASE_URL=http://127.0.0.1:8787/v1
+export OPENAI_API_KEY=wgpu_sk_…
+```
+
+On PowerShell, use `$env:ANTHROPIC_BASE_URL = '…'`; the app's Developer API page generates the block for the platform it detects.
+
+Things that matter for an agent CLI:
+
+- **Context.** Claude Code sends a **16,588-character** system prompt plus 23 tool definitions before your message. Load the model with a **32,768-token context and at least a 2 GiB budget**, or the request will not fit. The app's recommended 4,096-token default is too small. The relay clamps `max_tokens` to the remaining context.
+- **No tool calling.** This engine generates text only. Tool definitions are accepted and ignored, and no `tool_use` block is ever emitted. Claude Code can answer a prompt and stream the reply, but it cannot call Read, Edit, or Bash, so it will not change files. That is a limitation of the runtime, not of the relay. CLIs that work from plain text (for example aider's diff formats) are a better fit.
+- **One at a time.** The runtime runs one generation, so the relay queues requests; more than four queued requests get `429`.
+- **Loopback only.** The relay binds `127.0.0.1` and rejects other Host headers; requests need the bearer key from this tab. `/health` is unauthenticated and reports only that a relay and model exist.
+- **Endpoints.** `POST /v1/messages`, `POST /v1/chat/completions`, `GET /v1/models`, `POST /v1/messages/count_tokens` (a character-based estimate). OpenAI's Responses API, used by Codex CLI, is not implemented; neither are images, audio, or MCP.
+
+Verified on 2026-10-19: Qwen3.5 0.8B in a headless tab at a 32K context, Claude Code printing `pong` through the relay with exit code 0, and the same model answering both `/v1/messages` and `/v1/chat/completions` with `Paris`. Raw details are in [the validation notes](docs/VALIDATION.md#coding-cli-relay-090).
 
 ## Verification
 
@@ -203,7 +239,7 @@ Open `http://127.0.0.1:8787/verify.html` and select **Run kernel checks**. These
 
 CPU tests cover independently packed quantization fixtures, non-finite sampling rejection, file bounds, HTTP range enforcement, invalid GGUF headers, real Qwen3.8 tensor shapes, MTP exclusion, and 17 reference tokenizer cases from Hugging Face's tokenizer. GitHub Actions runs these tests and the production build before publishing the static application.
 
-Ollama integration tests exercise namespaced discovery, unsupported and incomplete models, malformed manifests, tag changes, selected-model HTTP byte ranges, opaque IDs, and origin restrictions. The browser picker has been checked with an actual installed `qwen3.8:27b`, including search, refresh, and loading into the runtime.
+Ollama integration tests exercise namespaced discovery, unsupported and incomplete models, malformed manifests, tag changes, selected-model HTTP byte ranges, opaque IDs, and origin restrictions. The browser picker has been checked with an actual installed `qwen3.8:27b`, including search, refresh, and loading into the runtime. Relay tests cover OpenAI and Anthropic streaming, non-streaming aggregation, content-block flattening, missing-tab and no-model errors, keyless rejection, and model announcement; 73 Node tests pass in total.
 
 Pager tests check larger pages, fixed cache reuse, bounded GPU allocations, adapter/dispatch limits, and invalid performance settings. GPU matrix and recurrent checks run 128-token batches against independent CPU references. The verification page also offers **Compare speed presets (2 tokens each)**: it runs the same local model and greedy prompt sequentially in both presets and reports token times, read bytes, cache hits, and tracked memory. This is a short benchmark rather than a universal speed guarantee.
 
@@ -218,6 +254,7 @@ On an RTX 5070 (adapter `blackwell`) **12/12 generated token ids matched** acros
 - Implements dense text inference for `llama` (Llama 3.x, Mistral, SmolLM), `qwen2` (Qwen2/2.5), `qwen3`, `gemma3`, and hybrid `qwen35` (Qwen3.5, Qwen3.8 27B) architectures. Other architecture identifiers are rejected with an explicit message. That includes Gemma 4 (`gemma4`) and every mixture-of-experts file such as Qwen3.5 35B-A3B, Qwen3.5 122B-A10B, Qwen3 30B-A3B, and Gemma 4 26B-A4B: this engine executes dense transformer layers only, so it does not run them. Other sizes sharing a supported architecture are not all validated on hardware; the 0.8B Qwen3.5 build is.
 - Chat framing is taken from `tokenizer.chat_template` and cross-checked against the vocabulary; a file with an unrecognized template fails instead of producing a malformed prompt. Llama 3 and YaRN `rope.scaling` factors are accepted and currently left unapplied to the rotation, so extremely long contexts on those models lose some positional accuracy.
 - Qwen chat runs in non-thinking mode. Images, video, tool execution, speculative MTP decoding, and extended reasoning controls are not exposed.
+- The coding-CLI relay forwards text chat only: it accepts tool definitions but never emits `tool_use`, and OpenAI's Responses API is not implemented.
 - Does not implement arbitrary model architectures, image/audio encoders, split GGUF files, or every GGML quantization format.
 - Does not provide a CPU-only fallback if WebGPU is unavailable.
 - Uses f32 attention state. Gemma local layers use bounded sliding caches; full-attention layers retain the configured context. Dense models keep a KV cache for the configured context, so a 32K context costs more GPU memory than a 2K one. Qwen allocates KV only for full-attention layers, plus fixed recurrent state. Runtime context is capped at 32,768 tokens even if a model advertises more. Hardware may require a lower setting.

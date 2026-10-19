@@ -4,6 +4,7 @@ import { createOllamaPicker } from './ollama-picker.ts';
 import { createLibraryPicker } from './local-library.ts';
 import { maskApiKey, readApiKey, rotateApiKey } from './api-key.ts';
 import { createBridge } from './bridge.ts';
+import { createCliBridge } from './cli-bridge.ts';
 import { attentionMemory, suggestBudget } from './core/context.ts';
 
 const icons: Record<string, string> = {
@@ -21,6 +22,7 @@ const icons: Record<string, string> = {
   copy: '<rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V3H3v13h5"/>',
   spark: '<path d="m12 2 3 7 7 3-7 3-3 7-3-7-7-3 7-3Z"/>',
   disk: '<rect x="3" y="5" width="18" height="14" rx="3"/><path d="M3 13h18M7 16h1m3 0h1"/>',
+  terminal: '<path d="m4 7 5 5-5 5M12 17h8"/>',
 };
 const icon = (name: string, cls = '') => `<svg class="icon ${cls}" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name] ?? icons.box}</svg>`;
 /** Mark: the same crisp W as the site icon, drawn as square-joined strokes. */
@@ -55,7 +57,7 @@ let sharedSource: SourceInput | undefined;
 $('app').innerHTML = `
 <aside class="sidebar">
   <a class="brand" aria-label="WebGPU home" href="#playground"><span class="brandmark">${brandmark}</span><span>WebGPU<span class="brand-dot">.</span></span></a>
-  <span class="edition">BROWSER INFERENCE / 0.8</span>
+  <span class="edition">BROWSER INFERENCE / 0.9</span>
   <button id="new-chat" aria-label="New conversation" class="new-chat">${icon('plus')}<span>New conversation</span><span class="key">↵</span></button>
   <div class="nav-label">WORKSPACE</div>
   <nav aria-label="Main navigation">
@@ -94,7 +96,7 @@ $('app').innerHTML = `
       <div class="panel layer-panel"><div class="panel-top"><div class="panel-title">Transformer layers</div><span class="subtle-badge" id="layer-count">Load a model to inspect</span></div><div id="layers" class="layers"></div><p class="field-help"><span id="runtime-batch">Prompt batches: up to 32 tokens.</span> Each weight page is reused across the batch. A fixed resident cache keeps frequently traversed weight pages on the GPU. Other pages reuse one streaming buffer.</p></div><div class="honest-note"><b>What this mechanism does</b><p>It reduces the amount of model weight memory allocated at once. It does not reduce the work required to run 27 billion parameters. Speed depends heavily on disk throughput, GPU performance, context length, and the chosen memory budget.</p></div>
     </section>
     <section class="page" id="page-models"><div class="section-heading"><span class="eyebrow">BRING YOUR OWN WEIGHTS</span><h1>A local file.<br><span>A whole lot of intelligence.</span></h1><p class="intro">Qwen3.5, Qwen3, Gemma 3 and Qwen3.8. Dense text models, running entirely in your browser.</p></div><div class="panel ollama-library-banner"><div><h2>Your own model folder.</h2><p>Choose the folder that holds your GGUF files or your Ollama library. The browser remembers it, so nothing has to be installed or served.</p></div><button class="primary" data-open="library">Choose a folder →</button></div><div class="model-guide-grid"><div class="panel model-card"><span class="model-badge">RECOMMENDED · 0.8–4B</span><div class="model-card-symbol">Q<span>3.5</span></div><h2>Qwen3.5</h2><p>The current Qwen generation. The 0.8B build was tested here with real weights: 0.48 GiB read, 0.54 GiB peak GPU memory, correct answer. The 9B build needs the Faster preset and leaves little room for buffers.</p><div class="model-facts"><span>Q4_K_M file <b>0.5–3.3 GB</b></span><span>Architecture <b>qwen35</b></span><span>Execution <b>Browser WebGPU</b></span></div><button class="primary full" data-open="library">${icon('upload')} Open from a folder</button><p class="field-help"><a href="https://ollama.com/library/qwen3.5:0.8b" target="_blank" rel="noreferrer">Get Qwen3.5 weights ↗</a></p></div><div class="panel model-card"><span class="model-badge">SMALL · 0.6–8B</span><div class="model-card-symbol">Q<span>3</span></div><h2>Qwen3</h2><p>Dense Qwen3 models from 0.6B to 8B. Q/K normalization and attention bias are detected from the file, so the whole family runs on the same code path.</p><div class="model-facts"><span>Q4_K_M file <b>0.4–5 GB</b></span><span>Architecture <b>qwen3</b></span><span>Execution <b>Browser WebGPU</b></span></div><button class="primary full" data-open="library">${icon('upload')} Open from a folder</button><p class="field-help"><a href="https://ollama.com/library/qwen3:4b" target="_blank" rel="noreferrer">Get Qwen3 weights ↗</a></p></div><div class="panel model-card"><span class="model-badge">DENSE · 1–12B</span><div class="model-card-symbol">G<span>3</span></div><h2>Gemma 3</h2><p>Interleaved local and global attention, executed with fixed-size sliding-window buffers so memory stays flat. The newest Gemma this runtime can execute.</p><div class="model-facts"><span>Q4_K_M file <b>0.8–8.2 GB</b></span><span>Architecture <b>gemma3</b></span><span>Execution <b>Browser WebGPU</b></span></div><button class="primary full" data-open="library">${icon('upload')} Open from a folder</button><p class="field-help"><a href="https://ollama.com/library/gemma3:4b" target="_blank" rel="noreferrer">Get Gemma 3 weights ↗</a></p></div><div class="panel model-card"><span class="model-badge">LARGE · 27B PAGED</span><div class="model-card-symbol">Q<span>3.8</span></div><h2>Qwen3.8 27B / Gemma 3 27B</h2><p>27B weights streamed through a bounded GPU budget instead of being loaded whole. Slow, but they fit where they otherwise would not.</p><div class="model-facts"><span>Q4_K_M file <b>~16.6–16.8 GB</b></span><span>Architectures <b>gemma3 · qwen35</b></span><span>Execution <b>Browser WebGPU</b></span></div><button class="primary full" data-open="library">${icon('upload')} Open from a folder</button></div><div class="panel guide-card"><h2>Get your model ready</h2><ol><li><strong>Download any supported GGUF</strong><p>From Ollama, Hugging Face or an existing file on disk. You need disk space, and the model licence applies.</p><code>ollama pull qwen3.5:0.8b</code><p>Also <code class="inline-code">qwen3:4b</code>, <code class="inline-code">gemma3:4b</code> and <code class="inline-code">qwen3.8:27b</code>.</p></li><li><strong>Point the browser at the folder</strong><p>Pick <code class="inline-code">~/.ollama/models</code> or any folder of GGUFs with <b>Open local models</b>. The folder handle is remembered between visits.</p></li><li><strong>Start small</strong><p>A 0.5–4B model stays fully resident in a small GPU budget. Anything larger pages weights from disk and needs patience.</p></li></ol><p class="limits-note"><b>Not runnable here:</b> Gemma 4 and every mixture-of-experts build, including Qwen3.5 35B-A3B, Qwen3.5 122B-A10B and Gemma 4 26B-A4B. Those use the <code class="inline-code">gemma4</code> architecture or MoE routing, which this engine does not implement, so they are rejected when they load. Older dense families still work: Llama 3.x, Qwen2.5, SmolLM2 and Mistral.</p></div></div></section>
-    <section class="page" id="page-api"><div class="section-heading"><span class="eyebrow">MADE TO BUILD WITH</span><h1>One key.<br><span>Your own inference endpoint.</span></h1><p class="intro">Let another page, tab or an embedding site drive the model that is loaded in this tab. The key is the only thing you copy.</p></div><div class="access-grid"><div class="panel access-card"><div class="panel-top"><div class="panel-title">${icon('shield')} Access key</div><span class="subtle-badge" id="key-status">Active</span></div><div class="access-body"><label class="field-label" for="api-key-value">BEARER KEY <span id="key-visibility">HIDDEN</span></label><div class="key-row"><code class="key-value" id="api-key-value">…</code></div><div class="key-actions"><button class="secondary" id="copy-key">${icon('copy')} Copy key</button><button class="secondary" id="reveal-key">Reveal</button><button class="text-button" id="rotate-key">Generate new key</button></div><p class="field-help">Stored in this browser only. The key authorises the bridge in this tab. Rotating it invalidates the previous key immediately.</p><div class="key-meta"><span>Channel <b>webgpu-runtime</b></span><span>Origin <b id="api-origin">…</b></span><span><b id="bridge-clients">0</b> clients</span><span>Model <b id="bridge-model">none</b></span></div></div></div><div class="panel access-card"><div class="panel-top"><div class="panel-title">${icon('code')} Stream a completion</div><button class="text-button" id="copy-client">${icon('copy')} Copy</button></div><div class="access-body"><p class="access-intro">Paste this into any page on the same origin. Tokens stream here as they are generated.</p><pre class="access-code"><code id="api-client"></code></pre></div></div></div><div class="api-grid"><div class="panel api-card"><code>method: 'chat.completions'</code><p>Send <b>messages</b> with optional <b>maxTokens</b>, <b>temperature</b>, <b>topK</b> and <b>topP</b>. The reply streams as <b>chunk</b> events and ends with <b>done</b>.</p></div><div class="panel api-card"><code>method: 'ping'</code><p>Checks the key and reports the loaded model, architecture and context length without generating anything.</p></div><div class="panel api-card"><code>event.type: 'error'</code><p>Returned for a wrong key, no loaded model, a busy runtime or invalid messages. One generation runs at a time.</p></div></div><div class="panel embed-panel"><div class="panel-top"><div class="panel-title">${icon('link')} From an embedding page</div><button class="text-button" id="copy-embed">${icon('copy')} Copy</button></div><p class="access-intro">Embed this app in an iframe and the parent page can post the same request with the same key. Events arrive through <b>postMessage</b>.</p><pre class="access-code"><code id="api-embed"></code></pre></div><p class="api-note">The bridge lives in this page, not in a server: requests are answered only while this tab is open with a model loaded. Inference, tokenisation and the key stay on this device. A browser cannot listen on an HTTP port, so other tools reach the runtime through this channel rather than a base URL.</p><div class="panel api-panel"><div class="panel-top"><div class="panel-title">${icon('box')} Browser SDK</div><button class="text-button" id="copy-api">${icon('copy')} Copy</button></div><pre><code id="api-example"></code></pre></div></section>
+    <section class="page" id="page-api"><div class="section-heading"><span class="eyebrow">MADE TO BUILD WITH</span><h1>One key.<br><span>Your own inference endpoint.</span></h1><p class="intro">Let another page, tab or an embedding site drive the model that is loaded in this tab. The key is the only thing you copy.</p></div><div class="access-grid"><div class="panel access-card"><div class="panel-top"><div class="panel-title">${icon('shield')} Access key</div><span class="subtle-badge" id="key-status">Active</span></div><div class="access-body"><label class="field-label" for="api-key-value">BEARER KEY <span id="key-visibility">HIDDEN</span></label><div class="key-row"><code class="key-value" id="api-key-value">…</code></div><div class="key-actions"><button class="secondary" id="copy-key">${icon('copy')} Copy key</button><button class="secondary" id="reveal-key">Reveal</button><button class="text-button" id="rotate-key">Generate new key</button></div><p class="field-help">Stored in this browser only. The key authorises the bridge in this tab. Rotating it invalidates the previous key immediately.</p><div class="key-meta"><span>Channel <b>webgpu-runtime</b></span><span>Origin <b id="api-origin">…</b></span><span><b id="bridge-clients">0</b> clients</span><span>Model <b id="bridge-model">none</b></span></div></div></div><div class="panel access-card"><div class="panel-top"><div class="panel-title">${icon('code')} Stream a completion</div><button class="text-button" id="copy-client">${icon('copy')} Copy</button></div><div class="access-body"><p class="access-intro">Paste this into any page on the same origin. Tokens stream here as they are generated.</p><pre class="access-code"><code id="api-client"></code></pre></div></div></div><div class="api-grid"><div class="panel api-card"><code>method: 'chat.completions'</code><p>Send <b>messages</b> with optional <b>maxTokens</b>, <b>temperature</b>, <b>topK</b> and <b>topP</b>. The reply streams as <b>chunk</b> events and ends with <b>done</b>.</p></div><div class="panel api-card"><code>method: 'ping'</code><p>Checks the key and reports the loaded model, architecture and context length without generating anything.</p></div><div class="panel api-card"><code>event.type: 'error'</code><p>Returned for a wrong key, no loaded model, a busy runtime or invalid messages. One generation runs at a time.</p></div></div><div class="panel embed-panel"><div class="panel-top"><div class="panel-title">${icon('link')} From an embedding page</div><button class="text-button" id="copy-embed">${icon('copy')} Copy</button></div><p class="access-intro">Embed this app in an iframe and the parent page can post the same request with the same key. Events arrive through <b>postMessage</b>.</p><pre class="access-code"><code id="api-embed"></code></pre></div><div class="panel embed-panel cli-panel"><div class="panel-top"><div class="panel-title">${icon('terminal')} Coding CLIs</div><button class="text-button" id="copy-cli">${icon('copy')} Copy</button></div><p class="access-intro">Run the app with <b>npm start</b> and a loopback relay exposes Anthropic and OpenAI endpoints for coding tools. Claude Code and other CLIs send prompts to the relay; this tab still runs every token. Use a 32,768-token context and a 2 GiB budget for Claude Code, and note that tool calling is not implemented: it can answer in text but cannot edit files by itself.</p><pre class="access-code"><code id="api-cli"></code></pre><div class="key-meta"><span>Relay <b id="cli-relay">…</b></span><span>State <b id="cli-state">…</b></span><span>Model <b id="cli-model">none</b></span><span>Auth <b>bearer key</b></span></div><p class="field-help" id="cli-help">Load a model here, then run one of the snippets. GitHub Pages has no server; the relay exists only under npm start.</p></div><p class="api-note">The in-page bridge answers only while this tab is open with a model loaded. Inference, tokenisation and the key stay on this device. Under <b>npm start</b> the same key also authorises a loopback relay that speaks <b>/v1/messages</b> and <b>/v1/chat/completions</b>: it forwards requests into this tab, and Node still never evaluates the model.</p><div class="panel api-panel"><div class="panel-top"><div class="panel-title">${icon('box')} Browser SDK</div><button class="text-button" id="copy-api">${icon('copy')} Copy</button></div><pre><code id="api-example"></code></pre></div></section>
     <div id="notice" class="notice" role="status" hidden></div>
   </main><footer><span>WebGPU <b> / </b> Browser-native local AI</span><span>Open source. No API keys. No inference fees.</span></footer>
 </div><input id="model-file" type="file" accept=".gguf,application/octet-stream" hidden>
@@ -163,6 +165,26 @@ frame.contentWindow.postMessage({
   messages: [{ role: 'user', content: 'Name the capital of France.' }],
 }, '*');`;
 }
+function cliExample(key: string) {
+  const local = ['127.0.0.1', 'localhost', '[::1]'].includes(location.hostname);
+  if (!local) return `# The relay listens on your own machine, not on GitHub Pages.
+npm start
+# Then open http://127.0.0.1:8787 and copy the snippet from this panel.`;
+  const origin = location.origin;
+  const windows = /Windows/i.test(navigator.userAgent);
+  const set = (name: string, value: string) => windows ? `$env:${name} = '${value}'` : `export ${name}='${value}'`;
+  return `# Claude Code (Anthropic Messages API)
+${set('ANTHROPIC_BASE_URL', origin)}
+${set('ANTHROPIC_AUTH_TOKEN', key)}
+claude
+
+# Any OpenAI-compatible CLI
+${set('OPENAI_BASE_URL', `${origin}/v1`)}
+${set('OPENAI_API_KEY', key)}
+
+# Or check the relay before launching
+npm run cli -- --key ${key}`;
+}
 type Preset = 'lite' | 'low-memory' | 'fast';
 const BATCHES: Record<Preset, number> = { lite: 8, 'low-memory': 32, fast: 128 };
 const PRESET_BUDGET: Record<Preset, number> = { lite: 512, 'low-memory': 2048, fast: 6144 };
@@ -180,7 +202,8 @@ const bridgeHost = () => ({
   busy: () => busy,
 });
 let bridge = createBridge(bridgeHost(), apiKey);
-function restartBridge() { bridge.dispose(); bridge = createBridge(bridgeHost(), apiKey); }
+let cliBridge = createCliBridge(bridgeHost(), apiKey);
+function restartBridges() { bridge.dispose(); cliBridge.dispose(); bridge = createBridge(bridgeHost(), apiKey); cliBridge = createCliBridge(bridgeHost(), apiKey); }
 function notify(message: string, error = false) { $('notice').textContent = message; $('notice').hidden = false; $('notice').classList.toggle('error', error); }
 function clearNotice() { $('notice').hidden = true; }
 async function copyText(text: string, message: string) {
@@ -197,9 +220,16 @@ function updateApiPanel() {
   $('api-origin').textContent = location.origin;
   $('api-client').textContent = clientExample(apiKey);
   $('api-embed').textContent = embedExample(apiKey);
+  $('api-cli').textContent = cliExample(apiKey);
   $('api-example').textContent = sdkExample;
   $('bridge-clients').textContent = String(bridge.clientCount());
   $('bridge-model').textContent = info ? `${info.config.name} · ${info.config.architecture}` : 'none';
+  $('cli-relay').textContent = cliBridge.status() === 'disabled' ? 'not running' : location.origin;
+  $('cli-state').textContent = ({ ready: 'relay ready', starting: 'connecting', offline: 'relay unreachable', disabled: 'static host' } as const)[cliBridge.status()];
+  $('cli-model').textContent = info ? info.config.name : 'none';
+  $('cli-help').textContent = cliBridge.status() === 'disabled'
+    ? 'GitHub Pages serves static files only. Run npm start locally to expose the relay.'
+    : info ? 'Ready. One coding-CLI request runs at a time and its tokens stream from this tab.' : 'Load a model here. The relay waits until one is ready.';
   $('key-chip-state').textContent = info ? 'live' : 'standby';
   $('key-chip-state').dataset.state = info ? 'live' : 'standby';
 }
@@ -232,7 +262,7 @@ function onProgress(p: Progress) {
 runtime.onProgress = onProgress;
 function sizeLabel(mib: number) { return mib >= 1024 ? `${(mib / 1024).toFixed(1)} GiB` : `${Math.round(mib)} MiB`; }
 async function loadModel(selected: SourceInput, preserveConversation = false) {
-  if (busy) return; clearNotice(); source = selected; info = undefined; switchPage('playground'); setBusy(true);
+  if (busy) return; clearNotice(); source = selected; info = undefined; cliBridge.announce(); switchPage('playground'); setBusy(true);
   runtime.dispose(); runtime = new WebGPU(); runtime.onProgress = onProgress;
   try {
     const mode = $<HTMLSelectElement>('performance').value as Preset;
@@ -246,6 +276,7 @@ async function loadModel(selected: SourceInput, preserveConversation = false) {
     const budget = Number($<HTMLInputElement>('budget').value);
     const loaded = await runtime.load(selected, { gpuBudgetMiB: budget, contextLength: Number($<HTMLSelectElement>('context').value), batchSize: BATCHES[mode], performance: mode });
     info = loaded;
+    cliBridge.announce();
     if (!preserveConversation || !messages.length) {
       messages = []; $('conversation').replaceChildren();
       const ready = document.createElement('div'); ready.className = 'ready-message'; ready.innerHTML = `${icon('spark')}<h2>Model ready.</h2><p>Weights stay on your disk. Messages stay in this tab.</p>`; $('conversation').append(ready);
@@ -335,12 +366,13 @@ $('export-chat').addEventListener('click', () => { if (!messages.length) return 
 $('copy-api').addEventListener('click', () => void copyText(sdkExample, 'Browser SDK example copied.'));
 $('copy-client').addEventListener('click', () => void copyText(clientExample(apiKey), 'Client snippet copied.'));
 $('copy-embed').addEventListener('click', () => void copyText(embedExample(apiKey), 'Embedding snippet copied.'));
+$('copy-cli').addEventListener('click', () => void copyText(cliExample(apiKey), 'Coding CLI setup copied.'));
 $('copy-key').addEventListener('click', () => void copyText(apiKey, 'API key copied.'));
 $('reveal-key').addEventListener('click', () => { revealedKey = !revealedKey; updateApiPanel(); });
-$('rotate-key').addEventListener('click', () => { apiKey = rotateApiKey(); restartBridge(); revealedKey = true; updateApiPanel(); notify('New API key generated. The previous key stopped working.'); });
+$('rotate-key').addEventListener('click', () => { apiKey = rotateApiKey(); restartBridges(); revealedKey = true; updateApiPanel(); notify('New API key generated. The previous key stopped working.'); });
 updateApiPanel();
 setInterval(() => { if (active === 'api') updateApiPanel(); }, 2500);
-window.addEventListener('beforeunload', () => { runtime.dispose(); bridge.dispose(); });
+window.addEventListener('beforeunload', () => { runtime.dispose(); bridge.dispose(); cliBridge.dispose(); });
 void (async () => {
   const adapter = await navigator.gpu?.requestAdapter().catch(() => null);
   $('support-title').textContent = adapter ? 'WebGPU available' : 'WebGPU unavailable'; $('support-dot').classList.toggle('offline', !adapter);

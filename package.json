@@ -1,6 +1,6 @@
 {
   "name": "webgpu-paged",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "private": true,
   "type": "module",
   "description": "Browser-native, paged Qwen3.8 27B and Gemma 3 inference for models larger than GPU memory.",
@@ -9,7 +9,8 @@
     "build": "tsc --noEmit && vite build && tsc -p tsconfig.sdk.json && node scripts/finalize-sdk.mjs",
     "start": "node server/serve.mjs",
     "test": "node --experimental-strip-types --test tests/*.test.ts",
-    "check:dense": "node scripts/verify-dense.mjs"
+    "check:dense": "node scripts/verify-dense.mjs",
+    "cli": "node bin/webgpu-cli.mjs"
   },
   "engines": {
     "node": ">=22.18.0"
